@@ -1,7 +1,7 @@
-# DDoS Attacking Tool - Termux
+# DDoS Attacking Tool 
 
 ---
-![logo.webp](logo.webp)
+![DDoS](logo-on-light.svg)
 
 ---
 
