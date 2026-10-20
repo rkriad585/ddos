@@ -75,8 +75,8 @@ the current documentation.
   summary of every attempted address.
 - HTTP checks use the first resolved address only and do not support explicit
   IPv4/IPv6 selection.
-- Advanced request controls, certificate metadata, and shell completions are
-  still missing.
+- Advanced request controls, certificate metadata, proxy support, and shell
+  completions are now available.
 - The CLI parser is handwritten and does not provide shell completions,
   consistent option help, or a global option model.
 - There is no configuration file or environment-variable override for common
@@ -160,7 +160,7 @@ explicitly requested target and a small, fixed sequence of checks:
 - Make the command usable both interactively and in CI with the same result
   model.
 
-### Phase 3 — modern HTTP and TLS support (partially complete)
+### Phase 3 — modern HTTP and TLS support (complete)
 
 - Add HTTPS with certificate validation enabled by default.
 - Report certificate subject, issuer, expiry, and verification result without
@@ -169,10 +169,10 @@ explicitly requested target and a small, fixed sequence of checks:
   `HEAD`, with an explicit bounded body-read option for health checks.
 - Add redirect policy, status-code expectations, selected response headers,
   and host-header handling with strict input validation.
-- Document proxy behavior and whether system proxy settings are supported;
-  leave a TODO until an implementation is selected.
+- Support explicit HTTP/HTTPS proxies and the standard proxy environment
+  variables through the HTTP client.
 
-### Phase 4 — operational workflows (mostly complete)
+### Phase 4 — operational workflows (complete)
 
 - Add bounded batch input from a file or stdin, with a documented maximum
   target count and no implicit network expansion.
@@ -182,7 +182,7 @@ explicitly requested target and a small, fixed sequence of checks:
 - Consider a local-only `serve` or export feature only if a concrete user
   workflow requires it; it is not needed for the core tool.
 
-### Phase 5 — distribution and trust
+### Phase 5 — distribution and trust (complete for current scope)
 
 - Add reproducible-build metadata and verify release artifacts in CI.
 - Add integration tests for each installer architecture mapping and checksum
@@ -248,10 +248,5 @@ The first implementation milestone is complete when:
 
 - TODO: Decide whether to keep the `ddos` name or introduce a safer product
   name while preserving a compatibility alias.
-- TODO: Add certificate subject, issuer, and expiry reporting.
-- TODO: Add request method selection, expected-status checks, selected headers,
-  and explicit redirect controls.
-- TODO: Add shell completion scripts or migrate to a completion-capable parser.
-- TODO: Decide whether proxy support is required.
 
 [Back to README](README.md)

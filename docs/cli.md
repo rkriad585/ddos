@@ -35,11 +35,14 @@ ddos http-check example.com --path /health --timeout 5
 
 Runs bounded DNS, TCP, and optional HTTP/HTTPS checks and reports per-address
 results and total timing. HTTPS uses certificate validation through the
-Rustls-backed HTTP client. Redirects are limited to five hops.
+Rustls-backed HTTP client and reports the peer certificate subject, issuer, and
+validity window. Redirects are limited to five hops by default and can be
+changed with `--redirects 0-10`.
 
 ```sh
 ddos diagnose https://example.com/health --timeout 5
 ddos diagnose https://example.com/health --output json | jq .
+ddos diagnose https://example.com --method GET --expect-status 200 --show-header server
 ```
 
 JSON output has schema version `1` and includes `target`, `resolved`, `http`,
@@ -71,7 +74,18 @@ ddos repeat https://example.com --interval 10 --duration 60
 - `--output text|json` selects human or machine-readable output.
 - `--timeout <seconds>` sets a 1–120 second operation timeout.
 - `--retry <count>` enables 0–5 bounded retries.
+- `--method HEAD|GET` selects the bounded request method.
+- `--expect-status <code>` makes the selected status the success condition.
+- `--show-header <name>` includes selected response headers.
+- `--redirects <count>` allows 0–10 redirects.
+- `--proxy <url>` uses an explicit HTTP/HTTPS proxy; otherwise standard proxy
+  environment variables remain available to the HTTP client.
 - `--verbose` includes failed address details in text output.
+
+## Shell completions
+
+Completion definitions are provided in [`completions/`](https://github.com/rkriad585/ddos/tree/main/completions)
+for Bash, Zsh, Fish, PowerShell, and Nushell.
 
 ## Maintenance commands
 

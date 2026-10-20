@@ -62,6 +62,8 @@ aligned with the implemented commands.
 - Unified HTTPS/TLS diagnostics with bounded redirects and validated
   certificates.
 - JSON output, bounded retries, batch checks, and repeat monitoring.
+- Certificate metadata, expected-status checks, selected response headers,
+  redirect limits, proxy support, and shell completions.
 - Self-update through the official platform installer.
 - Self-uninstall of the current executable.
 - Release binaries for Linux, Windows, macOS, Android/Termux, and Nix.

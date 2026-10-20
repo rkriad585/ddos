@@ -7,7 +7,8 @@ No. The implementation performs bounded DNS, TCP, and HTTP diagnostics only.
 ## Does `diagnose` support HTTPS?
 
 Yes. `diagnose https://...` performs a bounded HTTPS request with certificate
-validation. The lower-level `http-check` command remains an HTTP check.
+validation and reports certificate metadata. The lower-level `http-check`
+command remains an HTTP check.
 
 ## Does the CLI read a configuration file?
 

@@ -1,10 +1,13 @@
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use rustls_pki_types::ServerName;
 use serde::Serialize;
 use std::env;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::process::{Command, ExitCode};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,6 +19,7 @@ const MAX_RETRIES: u32 = 5;
 const MAX_BATCH: usize = 100;
 const MAX_CONCURRENCY: usize = 8;
 const MAX_REPEAT_SECONDS: u64 = 3600;
+const MAX_REDIRECTS: u32 = 10;
 const INSTALL_SH: &str = "https://raw.githubusercontent.com/rkriad585/ddos/main/installer.sh";
 const INSTALL_PS1: &str = "https://raw.githubusercontent.com/rkriad585/ddos/main/installer.ps1";
 
@@ -31,6 +35,11 @@ struct Options {
     output: Output,
     verbose: bool,
     path: String,
+    method: String,
+    expect_status: Option<u16>,
+    show_headers: Vec<String>,
+    redirects: u32,
+    proxy: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -48,6 +57,16 @@ struct HttpResult {
     status_text: Option<String>,
     elapsed_ms: u128,
     error: Option<String>,
+    headers: Vec<(String, String)>,
+    status_ok: bool,
+    certificate: Option<CertificateSummary>,
+}
+#[derive(Serialize, Clone)]
+struct CertificateSummary {
+    subject: String,
+    issuer: String,
+    not_before: String,
+    not_after: String,
 }
 #[derive(Serialize, Clone)]
 struct DiagnosticReport {
@@ -71,7 +90,7 @@ struct ResolveReport {
 }
 
 fn usage() {
-    println!("ddos {VERSION} — bounded network diagnostics\n\nUsage:\n  ddos resolve <host> [--output text|json]\n  ddos tcp-check <host> <port> [--timeout <seconds>] [--retry <count>] [--output text|json]\n  ddos http-check <host> [port] [--path /path] [--timeout <seconds>] [--output text|json]\n  ddos diagnose <url|host:port> [--timeout <seconds>] [--retry <count>] [--output text|json]\n  ddos batch <file|-> [--timeout <seconds>] [--retry <count>] [--output text|json]\n  ddos repeat <url|host:port> --interval <seconds> --duration <seconds> [options]\n  ddos self-update\n  ddos self-uninstall\n  ddos --version\n  ddos --help\n\nExit codes: 0 success, 1 diagnostic failure, 2 invalid usage.\nLimits: timeout 1-120s, retries 0-5, batch 100 targets, concurrency 8, repeat 1 hour.\nOnly use this tool against systems you own or are authorized to test.");
+    println!("ddos {VERSION} — bounded network diagnostics\n\nUsage:\n  ddos resolve <host> [--output text|json]\n  ddos tcp-check <host> <port> [--timeout <seconds>] [--retry <count>] [--output text|json]\n  ddos http-check <host> [port] [--path /path] [--method HEAD|GET] [options]\n  ddos diagnose <url|host:port> [--method HEAD|GET] [--expect-status <code>] [options]\n  ddos batch <file|-> [--timeout <seconds>] [--retry <count>] [--output text|json]\n  ddos repeat <url|host:port> --interval <seconds> --duration <seconds> [options]\n  ddos self-update\n  ddos self-uninstall\n  ddos --version\n  ddos --help\n\nOptions: --timeout 1-120s, --retry 0-5, --redirects 0-10, --show-header NAME, --proxy URL, --output text|json.\nExit codes: 0 success, 1 diagnostic failure, 2 invalid usage.\nLimits: batch 100 targets, concurrency 8, repeat 1 hour.\nOnly use this tool against systems you own or are authorized to test.");
 }
 
 fn number(value: Option<&String>, name: &str, min: u64, max: u64) -> Result<u64, String> {
@@ -92,6 +111,11 @@ fn options(args: &[String]) -> Result<(Options, Vec<String>), String> {
         output: Output::Text,
         verbose: false,
         path: "/".into(),
+        method: "HEAD".into(),
+        expect_status: None,
+        show_headers: Vec::new(),
+        redirects: 5,
+        proxy: None,
     };
     let mut positional = Vec::new();
     let mut i = 0;
@@ -124,6 +148,45 @@ fn options(args: &[String]) -> Result<(Options, Vec<String>), String> {
                     );
                 }
                 out.path = path.clone();
+                i += 2;
+            }
+            "--method" => {
+                let method = args
+                    .get(i + 1)
+                    .ok_or("--method requires HEAD or GET")?
+                    .to_ascii_uppercase();
+                if method != "HEAD" && method != "GET" {
+                    return Err("--method must be HEAD or GET".into());
+                }
+                out.method = method;
+                i += 2;
+            }
+            "--expect-status" => {
+                let status = number(args.get(i + 1), "--expect-status", 100, 599)? as u16;
+                out.expect_status = Some(status);
+                i += 2;
+            }
+            "--show-header" => {
+                let header = args
+                    .get(i + 1)
+                    .ok_or("--show-header requires a name")?
+                    .to_ascii_lowercase();
+                if header.is_empty() || header.contains([':', '\r', '\n']) {
+                    return Err("--show-header must be a valid header name".into());
+                }
+                out.show_headers.push(header);
+                i += 2;
+            }
+            "--redirects" => {
+                out.redirects =
+                    number(args.get(i + 1), "--redirects", 0, MAX_REDIRECTS as u64)? as u32;
+                i += 2;
+            }
+            "--proxy" => {
+                let proxy = args.get(i + 1).ok_or("--proxy requires a URL")?;
+                ureq::Proxy::new(proxy)
+                    .map_err(|_| "--proxy must be an http:// or https:// URL")?;
+                out.proxy = Some(proxy.clone());
                 i += 2;
             }
             "--interval" => {
@@ -238,22 +301,86 @@ fn target(value: &str) -> Result<(String, u16, Option<String>), String> {
     Ok((value.into(), 80, None))
 }
 
-fn http_probe(url: &str, opts: &Options) -> HttpResult {
+fn certificate_probe(host: &str, port: u16, opts: &Options) -> Result<CertificateSummary, String> {
+    let address = resolve(host, port)
+        .map_err(|error| error.to_string())?
+        .first()
+        .copied()
+        .ok_or("no address available for TLS")?;
+    let stream =
+        TcpStream::connect_timeout(&address, opts.timeout).map_err(|error| error.to_string())?;
+    let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let name = ServerName::try_from(host.to_string()).map_err(|error| error.to_string())?;
+    let connection =
+        ClientConnection::new(Arc::new(config), name).map_err(|error| error.to_string())?;
+    let mut tls = StreamOwned::new(connection, stream);
+    tls.write_all(
+        format!(
+            "{} / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n",
+            opts.method
+        )
+        .as_bytes(),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut response = [0_u8; 1];
+    let _ = tls.read(&mut response);
+    let certificate = tls
+        .conn
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .ok_or("TLS peer did not provide a certificate")?;
+    let (_, parsed) = x509_parser::parse_x509_certificate(certificate.as_ref())
+        .map_err(|error| error.to_string())?;
+    Ok(CertificateSummary {
+        subject: parsed.subject().to_string(),
+        issuer: parsed.issuer().to_string(),
+        not_before: parsed.validity().not_before.to_string(),
+        not_after: parsed.validity().not_after.to_string(),
+    })
+}
+
+fn http_probe(url: &str, host: &str, port: u16, opts: &Options) -> HttpResult {
     let started = Instant::now();
-    let agent = ureq::AgentBuilder::new()
+    let mut builder = ureq::AgentBuilder::new()
         .timeout_connect(opts.timeout)
         .timeout_read(opts.timeout)
         .timeout_write(opts.timeout)
-        .redirects(5)
-        .user_agent(USER_AGENT)
-        .build();
-    match agent.head(url).call() {
+        .redirects(opts.redirects)
+        .user_agent(USER_AGENT);
+    if let Some(proxy) = &opts.proxy {
+        builder = builder
+            .proxy(ureq::Proxy::new(proxy).expect("proxy was validated during argument parsing"));
+    }
+    let agent = builder.build();
+    match agent.request(&opts.method, url).call() {
         Ok(response) => HttpResult {
             url: url.into(),
             status: Some(response.status()),
             status_text: Some(response.status_text().into()),
             elapsed_ms: started.elapsed().as_millis(),
             error: None,
+            headers: opts
+                .show_headers
+                .iter()
+                .filter_map(|name| {
+                    response
+                        .header(name)
+                        .map(|value| (name.clone(), value.into()))
+                })
+                .collect(),
+            status_ok: opts
+                .expect_status
+                .map_or(response.status() < 500, |expected| {
+                    response.status() == expected
+                }),
+            certificate: if url.starts_with("https://") {
+                certificate_probe(host, port, opts).ok()
+            } else {
+                None
+            },
         },
         Err(error) => HttpResult {
             url: url.into(),
@@ -261,6 +388,9 @@ fn http_probe(url: &str, opts: &Options) -> HttpResult {
             status_text: None,
             elapsed_ms: started.elapsed().as_millis(),
             error: Some(error.to_string()),
+            headers: Vec::new(),
+            status_ok: false,
+            certificate: None,
         },
     }
 }
@@ -274,10 +404,8 @@ fn diagnose(value: &str, opts: &Options) -> Result<DiagnosticReport, String> {
     }
     let results = addresses(&resolved, opts);
     let connected = results.iter().any(|v| v.connected);
-    let http = url.as_deref().map(|v| http_probe(v, opts));
-    let http_ok = http
-        .as_ref()
-        .is_none_or(|v| v.status.is_some_and(|s| s < 500));
+    let http = url.as_deref().map(|v| http_probe(v, &host, port, opts));
+    let http_ok = http.as_ref().is_none_or(|v| v.status_ok);
     Ok(DiagnosticReport {
         schema_version: 1,
         version: VERSION.into(),
@@ -335,6 +463,15 @@ fn print_report(report: &DiagnosticReport, opts: &Options) {
                 .map(|v| format!(" {v}"))
                 .unwrap_or_default()
         );
+        for (name, value) in &http.headers {
+            println!("  {name}: {value}");
+        }
+        if let Some(certificate) = &http.certificate {
+            println!(
+                "TLS: {} -> {} (expires {})",
+                certificate.subject, certificate.issuer, certificate.not_after
+            );
+        }
     }
 }
 
@@ -574,6 +711,11 @@ mod tests {
                 output: Output::Json,
                 verbose: false,
                 path: "/".into(),
+                method: "HEAD".into(),
+                expect_status: None,
+                show_headers: Vec::new(),
+                redirects: 5,
+                proxy: None,
             },
         );
         fs::remove_file(path).unwrap();
