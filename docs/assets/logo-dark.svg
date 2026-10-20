@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 790 240">
+  <g>
+    <rect x="92" y="92" width="56" height="56" fill="#FF5757"/>
+    <g fill="#EDEAE2" opacity="0.55">
+      <polygon points="110,26 130,26 130,100 140,100 120,124 100,100 110,100"/>
+      <polygon points="110,26 130,26 130,100 140,100 120,124 100,100 110,100" transform="rotate(120 120 120)"/>
+      <polygon points="110,26 130,26 130,100 140,100 120,124 100,100 110,100" transform="rotate(240 120 120)"/>
+    </g>
+  </g>
+  <g stroke="#EDEAE2" stroke-width="24" stroke-linecap="square" stroke-linejoin="miter" fill="none">
+    <path transform="translate(300 20)" d="M12 185 L12 15 L68 15 L88 35 L88 165 L68 185 L12 185"/>
+    <path transform="translate(430 20)" d="M12 185 L12 15 L68 15 L88 35 L88 165 L68 185 L12 185"/>
+    <path transform="translate(560 20)" d="M32 15 L68 15 L88 35 L88 165 L68 185 L32 185 L12 165 L12 35 Z"/>
+    <path transform="translate(690 20)" d="M88 15 L12 15 L12 95 L88 95 L88 185 L12 185"/>
+  </g>
+</svg>

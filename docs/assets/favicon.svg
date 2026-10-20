@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="24 12 192 216">
+  <defs>
+    <polygon id="a3" points="110,26 130,26 130,100 140,100 120,124 100,100 110,100"/>
+  </defs>
+  <g>
+    <rect x="92" y="92" width="56" height="56" fill="#E23B3B"/>
+    <g fill="#14151A" opacity="0.55">
+      <use href="#a3"/>
+      <use href="#a3" transform="rotate(120 120 120)"/>
+      <use href="#a3" transform="rotate(240 120 120)"/>
+    </g>
+  </g>
+</svg>

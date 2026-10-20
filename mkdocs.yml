@@ -8,7 +8,80 @@ site_dir: site
 
 theme:
   name: void
-  logo: assets/logo.svg
+  logo: assets/logo-light.svg
+  favicon: assets/favicon.svg
+  language: en
+  palette:
+    - scheme: slate
+      primary: black
+      accent: red
+      toggle:
+        name: Switch to light mode
+    - scheme: default
+      primary: white
+      accent: red
+      toggle:
+        name: Switch to dark mode
+  font:
+    text: Space Grotesk
+    code: Space Mono
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+  void:
+    glass: medium
+    dot_matrix: true
+    animation: normal
+    border: thin
+    content:
+      typography:
+        image_lightbox: true
+    reading_mode:
+      enabled: true
+      persisted: true
+    action_cluster:
+      enabled: true
+    timer:
+      enabled: true
+      default_minutes: 25
+    ai_reader:
+      enabled: true
+      llms: true
+      llms_full: true
+    social_cards:
+      enabled: true
+      jsonld: true
+      cards: true
+    meta:
+      enabled: true
+      show_last_updated: true
+      show_edit_on_github: true
+    pwa:
+      manifest: true
+      icons: true
+      display: standalone
+      theme_color: "#ff3030"
+      background_color: "#111114"
+
+extra:
+  void_logo_light: assets/logo-light.svg
+  void_logo_dark: assets/logo-dark.svg
+  void_og_image: __auto__
+  void_site_tagline: Bounded network diagnostics for authorized testing
+  void_theme_color: "#ff3030"
+
+markdown_extensions:
+  - admonition
+  - footnotes
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist
 
 plugins:
   - search
