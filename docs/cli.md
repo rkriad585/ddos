@@ -15,6 +15,19 @@ ddos resolve example.com --output json
 ddos resolve example.com --family ipv6
 ```
 
+Sample output:
+
+```text
+$ ddos resolve example.com --output csv
+host,family,address
+example.com,ipv4,104.20.23.154
+example.com,ipv4,172.66.147.243
+example.com,ipv6,2606:4700:10::6814:179a
+example.com,ipv6,2606:4700:10::ac42:93f3
+```
+
+Resolve exits `1` when no addresses are available.
+
 ### `tcp-check <host> <port> [options]`
 
 Attempts bounded TCP connections to every resolved address. Timeout values are
@@ -49,6 +62,15 @@ ddos udp-check 1.1.1.1 53 --payload 123401000001000000000000 --timeout 3
   `ping\n`).
 - Retries re-send the datagram with 50 ms exponential backoff.
 
+Sample output against a resolver that answers (payload shown is a small
+hand-built DNS query for `example.com/A`):
+
+```text
+$ ddos udp-check 1.1.1.1 53 --payload 123401000001000000000000076578616d706c6503636f6d0000010001 --timeout 3 --verbose
+OK 1.1.1.1:53 (34 ms)
+  ipv4 1.1.1.1:53 answered (34 ms, 61 bytes)
+```
+
 ## `dns-check <host> [options]`
 
 Sends one DNS query built by the built-in minimal DNS-over-UDP client.
@@ -63,6 +85,22 @@ ddos dns-check example.com --dns-type TXT --output json | jq '.answers'
   defaults to the first `nameserver` in `/etc/resolv.conf`.
 - Response codes are reported (`NXDOMAIN`, `SERVFAIL`, ...); a non-zero code
   is a failure.
+
+Sample output:
+
+```text
+$ ddos dns-check example.com --dns-type A --dns-server 1.1.1.1
+OK A example.com via 1.1.1.1 (63 ms)
+  A example.com ttl 119s 172.66.147.243
+  A example.com ttl 119s 104.20.23.154
+```
+
+A domain with no records of the requested type reports an error:
+
+```text
+FAIL CNAME example.org via 9.9.9.9 (121 ms)
+  error: no CNAME records returned
+```
 
 ## `diagnose <url|host:port> [options]`
 
@@ -163,6 +201,22 @@ standard HTTP
 options (`--header`, `--method`, `--expect-status`, ...) apply. Output
 `json`, `jsonl`, and `csv` modes report `sent`, `ok`, `failed`, a status
 histogram, latency min/avg/max, and the actual request rate.
+
+Sample output:
+
+```text
+$ ddos load-test http://localhost:3030 --rate 20 --count 100 --rotate-user-agent --method GET
+LOAD-TEST http://localhost:3030 sent 100 ok 100 failed 0 (5041 ms total, 19.8 req/s actual, target 20 req/s)
+  statuses: 200x100
+  latency min 2 ms avg 3 ms max 55 ms (user agents rotated)
+```
+
+Attempting a non-loopback target is refused:
+
+```text
+$ ddos load-test example.com
+error: load-test refuses non-loopback target "example.com": only localhost, 127.0.0.1, or ::1 are allowed
+```
 
 Use this to verify your own rate limiting, connection limits, and blocking
 rules once per change. For anything beyond loopback — including servers you

@@ -139,6 +139,30 @@ ddos dns-check example.com --dns-type TXT --output json | jq '.answers'
 ddos udp-check 1.1.1.1 53 --timeout 3 --output jsonl
 ```
 
+Sample output from a healthy HTTPS target:
+
+```text
+$ ddos diagnose https://example.com --show-header server --show-header content-type
+OK https://example.com (663 ms)
+DNS: 4 address(es)
+  ipv4 172.66.147.243:443 open (34 ms)
+  ipv4 104.20.23.154:443 open (41 ms)
+HTTP: 200 OK
+  server: cloudflare
+  content-type: text/html; charset=utf-8
+TLS: CN=example.com -> C=US, O=SSL Corporation, CN=Cloudflare TLS Issuing ECC CA 3 (expires Dec 25 22:56:35 2026 +00:00) serial 01:ee:e6:aa:bb:52:1d:5e:14:fc:31:5f:d9:98:56:90
+  SANs: example.com, *.example.com
+```
+
+Loopback load testing against a local dev server (loopback targets only):
+
+```text
+$ ddos load-test http://localhost:3030 --rate 50 --count 200 --rotate-user-agent --method GET
+LOAD-TEST http://localhost:3030 sent 200 ok 200 failed 0 (4071 ms total, 49.1 req/s actual, target 50 req/s)
+  statuses: 200x200
+  latency min 1 ms avg 3 ms max 47 ms (user agents rotated)
+```
+
 Maintenance commands:
 
 ```sh

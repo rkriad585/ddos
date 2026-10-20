@@ -17,5 +17,9 @@ authorized to test.
 - [Getting started](getting-started.md)
 - [Installation](installation.md)
 - [CLI reference](cli.md)
+- [Configuration](configuration.md)
+- [Architecture](architecture.md)
+- [FAQ](faq.md)
+- [Troubleshooting](troubleshooting.md)
 
 [Back to README](https://github.com/rkriad585/ddos/blob/main/README.md)
