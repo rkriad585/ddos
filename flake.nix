@@ -13,7 +13,7 @@
         in {
           default = pkgs.stdenv.mkDerivation {
             pname = "ddos";
-            version = "0.0.1-beta";
+            version = "0.0.0-beta-2";
             src = ./.;
             nativeBuildInputs = [ pkgs.rustc pkgs.cargo ];
             buildPhase = "cargo build --release --locked --offline";
