@@ -5,12 +5,32 @@ systems you own or are authorized to test. It performs one DNS lookup, one TCP
 connection check, or one HTTP `HEAD` request. It does not flood services,
 spoof traffic, evade protections, or generate concurrent attack traffic.
 
-## Install and use
+## Install
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/rkriad585/ddos/main/install.ps1 | iex
+```
+
+Linux/macOS:
+
+```sh
+curl -sL https://raw.githubusercontent.com/rkriad585/ddos/main/install.sh | bash
+```
 
 With Rust installed:
 
 ```sh
-cargo install --path .
+cargo install --git https://github.com/rkriad585/ddos.git
+```
+
+After installation, open a new shell if your bin directory was not already on
+`PATH`.
+
+## Use
+
+```sh
 
 ddos resolve example.com
 ddos tcp-check example.com 443 --timeout 5
