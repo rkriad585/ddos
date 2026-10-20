@@ -1,0 +1,28 @@
+site_name: ddos
+site_description: Bounded network diagnostics CLI for authorized testing
+site_url: https://rkriad585.github.io/ddos/
+repo_url: https://github.com/rkriad585/ddos
+repo_name: rkriad585/ddos
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: void
+  logo: assets/logo.svg
+
+plugins:
+  - search
+  - void
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Installation: installation.md
+  - CLI: cli.md
+  - Architecture: architecture.md
+  - Configuration: configuration.md
+  - Development: development.md
+  - Deployment: deployment.md
+  - Troubleshooting: troubleshooting.md
+  - FAQ: faq.md
+  - Screenshots: screenshots.md

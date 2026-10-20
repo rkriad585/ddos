@@ -1,0 +1,2 @@
+mkdocs-void
+Pillow
