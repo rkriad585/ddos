@@ -12,8 +12,8 @@ fn usage() {
     println!("ddos {VERSION} — bounded network diagnostics\n\nUsage:\n  ddos resolve <host>\n  ddos tcp-check <host> <port> [--timeout <seconds>]\n  ddos http-check <host> [port] [--path <path>] [--timeout <seconds>]\n  ddos self-update\n  ddos self-uninstall\n  ddos --version\n  ddos --help\n\nThese commands perform one DNS lookup or one connection/request. They never flood, spoof, randomize targets, or create concurrent traffic. self-uninstall removes only this executable.");
 }
 
-const INSTALL_SH: &str = "https://raw.githubusercontent.com/rkriad585/ddos/main/install.sh";
-const INSTALL_PS1: &str = "https://raw.githubusercontent.com/rkriad585/ddos/main/install.ps1";
+const INSTALL_SH: &str = "https://raw.githubusercontent.com/rkriad585/ddos/main/installer.sh";
+const INSTALL_PS1: &str = "https://raw.githubusercontent.com/rkriad585/ddos/main/installer.ps1";
 
 fn self_update() -> Result<(), String> {
     let status = if cfg!(windows) {
@@ -136,7 +136,7 @@ fn run(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         Some("self-update") => self_update(),
-        Some("self-uninstall") => self_uninstall(),
+        Some("self-uninstall") | Some("--selfuninstall") => self_uninstall(),
         Some("resolve") => {
             let host = args.get(1).ok_or("resolve requires <host>")?;
             let addresses = resolve(host, 0).map_err(|e| format!("resolve failed: {e}"))?;

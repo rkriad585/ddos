@@ -10,13 +10,13 @@ spoof traffic, evade protections, or generate concurrent attack traffic.
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/rkriad585/ddos/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/rkriad585/ddos/main/installer.ps1 | iex
 ```
 
 Linux/macOS/Termux:
 
 ```sh
-curl -sL https://raw.githubusercontent.com/rkriad585/ddos/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/rkriad585/ddos/main/installer.sh | sh
 ```
 
 With Rust installed:
@@ -36,14 +36,30 @@ ddos resolve example.com
 ddos tcp-check example.com 443 --timeout 5
 ddos http-check example.com --path /health --timeout 5
 ddos self-update
-ddos self-uninstall
+ddos --selfuninstall
 ```
 
 Run `ddos --help` for the complete command reference.
 
 `self-update` downloads the latest official release using the platform
-installer. `self-uninstall` removes only the currently running `ddos` binary;
-it does not remove your PATH entries or unrelated files.
+installer. The installer stores the binary in `~/.config/peekstore/ddos/` on
+Unix-like systems and `%USERPROFILE%\\.config\\peekstore\\ddos\\` on Windows.
+`ddos --selfuninstall` removes the current executable; the installer
+uninstall command also removes the managed directory and PATH entries.
+
+## Uninstall
+
+Windows (PowerShell):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/rkriad585/ddos/main/installer.ps1))) --selfuninstall
+```
+
+Linux/macOS/Termux:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/rkriad585/ddos/main/installer.sh | sh -s -- --selfuninstall
+```
 
 ## Development
 
