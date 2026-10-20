@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ["v0.0.1-beta"]
+    tags: ["v*.*.*"]
   workflow_dispatch:
 
 permissions:
