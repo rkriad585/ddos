@@ -35,9 +35,15 @@ After installation, open a new shell if your bin directory was not already on
 ddos resolve example.com
 ddos tcp-check example.com 443 --timeout 5
 ddos http-check example.com --path /health --timeout 5
+ddos self-update
+ddos self-uninstall
 ```
 
 Run `ddos --help` for the complete command reference.
+
+`self-update` downloads the latest official release using the platform
+installer. `self-uninstall` removes only the currently running `ddos` binary;
+it does not remove your PATH entries or unrelated files.
 
 ## Development
 

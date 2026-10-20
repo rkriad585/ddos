@@ -1,6 +1,7 @@
 use std::env;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::process::Command;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -8,7 +9,50 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_TIMEOUT: u64 = 5;
 
 fn usage() {
-    println!("ddos {VERSION} — bounded network diagnostics\n\nUsage:\n  ddos resolve <host>\n  ddos tcp-check <host> <port> [--timeout <seconds>]\n  ddos http-check <host> [port] [--path <path>] [--timeout <seconds>]\n  ddos --version\n  ddos --help\n\nThese commands perform one DNS lookup or one connection/request. They never flood, spoof, randomize targets, or create concurrent traffic.");
+    println!("ddos {VERSION} — bounded network diagnostics\n\nUsage:\n  ddos resolve <host>\n  ddos tcp-check <host> <port> [--timeout <seconds>]\n  ddos http-check <host> [port] [--path <path>] [--timeout <seconds>]\n  ddos self-update\n  ddos self-uninstall\n  ddos --version\n  ddos --help\n\nThese commands perform one DNS lookup or one connection/request. They never flood, spoof, randomize targets, or create concurrent traffic. self-uninstall removes only this executable.");
+}
+
+const INSTALL_SH: &str = "https://raw.githubusercontent.com/rkriad585/ddos/main/install.sh";
+const INSTALL_PS1: &str = "https://raw.githubusercontent.com/rkriad585/ddos/main/install.ps1";
+
+fn self_update() -> Result<(), String> {
+    let status = if cfg!(windows) {
+        Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
+            .arg(format!("irm {INSTALL_PS1} | iex"))
+            .status()
+            .map_err(|e| format!("could not start PowerShell: {e}"))?
+    } else {
+        Command::new("sh")
+            .args(["-c", &format!("curl -fsSL '{INSTALL_SH}' | bash")])
+            .status()
+            .map_err(|e| format!("could not start the installer: {e}"))?
+    };
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("installer exited with {status}"))
+    }
+}
+
+fn self_uninstall() -> Result<(), String> {
+    let executable = env::current_exe().map_err(|e| format!("could not locate executable: {e}"))?;
+    if cfg!(windows) {
+        let path = executable.to_string_lossy().replace('\'', "''");
+        Command::new("powershell")
+            .args(["-NoProfile", "-Command"])
+            .arg(format!(
+                "Start-Sleep -Milliseconds 500; Remove-Item -LiteralPath '{path}' -Force"
+            ))
+            .spawn()
+            .map_err(|e| format!("could not schedule removal: {e}"))?;
+        println!("Scheduled removal of {}", executable.display());
+    } else {
+        std::fs::remove_file(&executable)
+            .map_err(|e| format!("could not remove {}: {e}", executable.display()))?;
+        println!("Removed {}", executable.display());
+    }
+    Ok(())
 }
 
 fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
@@ -91,6 +135,8 @@ fn run(args: &[String]) -> Result<(), String> {
             println!("ddos {VERSION}");
             Ok(())
         }
+        Some("self-update") => self_update(),
+        Some("self-uninstall") => self_uninstall(),
         Some("resolve") => {
             let host = args.get(1).ok_or("resolve requires <host>")?;
             let addresses = resolve(host, 0).map_err(|e| format!("resolve failed: {e}"))?;
