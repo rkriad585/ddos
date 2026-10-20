@@ -8,7 +8,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_TIMEOUT: u64 = 5;
 
 fn usage() {
-    println!("ddos {VERSION} — bounded network diagnostics\n\nUsage:\n  ddos resolve <host>\n  ddos tcp-check <host> <port> [--timeout <seconds>]\n  ddos http-check <host> [port] [--timeout <seconds>]\n  ddos --version\n  ddos --help\n\nThese commands perform one DNS lookup or one connection/request. They never flood, spoof, randomize targets, or create concurrent traffic.");
+    println!("ddos {VERSION} — bounded network diagnostics\n\nUsage:\n  ddos resolve <host>\n  ddos tcp-check <host> <port> [--timeout <seconds>]\n  ddos http-check <host> [port] [--path <path>] [--timeout <seconds>]\n  ddos --version\n  ddos --help\n\nThese commands perform one DNS lookup or one connection/request. They never flood, spoof, randomize targets, or create concurrent traffic.");
 }
 
 fn resolve(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
@@ -63,7 +63,7 @@ fn tcp_check(host: &str, port: u16, timeout: Duration) -> io::Result<()> {
     ))
 }
 
-fn http_check(host: &str, port: u16, timeout: Duration) -> io::Result<()> {
+fn http_check(host: &str, port: u16, path: &str, timeout: Duration) -> io::Result<()> {
     let addresses = resolve(host, port)?;
     let address = addresses
         .first()
@@ -71,7 +71,7 @@ fn http_check(host: &str, port: u16, timeout: Duration) -> io::Result<()> {
     let mut stream = TcpStream::connect_timeout(address, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    let request = format!("HEAD / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: ddos/{VERSION}\r\n\r\n");
+    let request = format!("HEAD {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nUser-Agent: ddos/{VERSION}\r\n\r\n");
     stream.write_all(request.as_bytes())?;
     let mut response = [0_u8; 256];
     let size = stream.read(&mut response)?;
@@ -118,8 +118,37 @@ fn run(args: &[String]) -> Result<(), String> {
                 80
             };
             let option_start = if has_port { 3 } else { 2 };
-            let timeout = parse_timeout(&args[option_start..])?;
-            http_check(host, port, timeout).map_err(|e| e.to_string())
+            let mut path = "/";
+            let mut timeout = Duration::from_secs(DEFAULT_TIMEOUT);
+            let mut i = option_start;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--path" => {
+                        let value = args.get(i + 1).ok_or("--path requires a URL path")?;
+                        if !value.starts_with('/')
+                            || value.contains(['\r', '\n'])
+                            || value.len() > 2048
+                        {
+                            return Err("path must start with '/', contain no newlines, and be at most 2048 bytes".into());
+                        }
+                        path = value;
+                        i += 2;
+                    }
+                    "--timeout" => {
+                        let value = args.get(i + 1).ok_or("--timeout requires seconds")?;
+                        let seconds = value
+                            .parse::<u64>()
+                            .map_err(|_| "timeout must be an integer")?;
+                        if seconds == 0 || seconds > 120 {
+                            return Err("timeout must be between 1 and 120 seconds".into());
+                        }
+                        timeout = Duration::from_secs(seconds);
+                        i += 2;
+                    }
+                    option => return Err(format!("unknown option: {option}")),
+                }
+            }
+            http_check(host, port, path, timeout).map_err(|e| e.to_string())
         }
         Some(command) => Err(format!("unknown command: {command}")),
     }

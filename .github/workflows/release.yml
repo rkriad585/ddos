@@ -20,15 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
-        with:
-          path: ~/.cargo
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - run: cargo fmt --all -- --check
       - run: cargo test --all-targets
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
-  build:
+  native:
     name: Build ${{ matrix.name }}
     needs: verify
     if: startsWith(github.ref, 'refs/tags/v')
@@ -38,9 +34,10 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, name: ddos-linux-x86_64 }
-          - { os: macos-latest, target: aarch64-apple-darwin, name: ddos-macos-aarch64 }
           - { os: macos-13, target: x86_64-apple-darwin, name: ddos-macos-x86_64 }
+          - { os: macos-latest, target: aarch64-apple-darwin, name: ddos-macos-aarch64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, name: ddos-windows-x86_64.exe }
+          - { os: windows-11-arm, target: aarch64-pc-windows-msvc, name: ddos-windows-aarch64.exe }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -50,16 +47,77 @@ jobs:
       - name: Stage artifact
         shell: bash
         run: |
-          mkdir dist
-          cp "target/${{ matrix.target }}/release/ddos${{ runner.os == 'Windows' && '.exe' || '' }}" "dist/${{ matrix.name }}"
+          mkdir -p dist
+          suffix=""
+          if [[ "${{ matrix.target }}" == *windows* ]]; then suffix=".exe"; fi
+          cp "target/${{ matrix.target }}/release/ddos${suffix}" "dist/${{ matrix.name }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: dist/${{ matrix.name }}
 
+  linux-arm64:
+    name: Build Linux ARM64
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - run: cross build --locked --release --target aarch64-unknown-linux-gnu
+      - run: mkdir -p dist && cp target/aarch64-unknown-linux-gnu/release/ddos dist/ddos-linux-aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ddos-linux-aarch64
+          path: dist/ddos-linux-aarch64
+
+  android:
+    name: Build Android Termux ARM64
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: android-actions/setup-android@v3
+      - name: Install Android NDK
+        run: sdkmanager "platform-tools" "platforms;android-34" "ndk;27.2.12479018"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - name: Build
+        run: |
+          export NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          export PATH="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
+          cargo build --locked --release --target aarch64-linux-android
+      - run: mkdir -p dist && cp target/aarch64-linux-android/release/ddos dist/ddos-termux-aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ddos-termux-aarch64
+          path: dist/ddos-termux-aarch64
+
+  nix:
+    name: Build Nix package
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+      - run: nix build --print-build-logs
+      - run: mkdir -p dist && cp result/bin/ddos dist/ddos-nix-x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ddos-nix-x86_64
+          path: dist/ddos-nix-x86_64
+
   release:
     name: Publish GitHub release
-    needs: build
+    needs: [native, linux-arm64, android, nix]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:

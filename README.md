@@ -34,7 +34,7 @@ After installation, open a new shell if your bin directory was not already on
 
 ddos resolve example.com
 ddos tcp-check example.com 443 --timeout 5
-ddos http-check example.com --timeout 5
+ddos http-check example.com --path /health --timeout 5
 ```
 
 Run `ddos --help` for the complete command reference.
@@ -48,9 +48,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release
 ```
 
-Tagged releases (`v0.1.0`, for example) are built for Linux, macOS, and
-Windows by [the release workflow](.github/workflows/release.yml), with SHA-256
-checksums attached to the GitHub release.
+Tagged releases (`v0.1.0`, for example) are built for Linux, Windows, macOS,
+Nix, and Android/Termux by [the release workflow](.github/workflows/release.yml),
+with SHA-256 checksums attached to the GitHub release.
 
 Use this software only for authorized diagnostics. Testing third-party systems
 without permission may be illegal and disruptive.

@@ -2,7 +2,8 @@ $ErrorActionPreference = "Stop"
 
 $repo = "rkriad585/ddos"
 $release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
-$asset = $release.assets | Where-Object { $_.name -eq "ddos-windows-x86_64.exe" } | Select-Object -First 1
+$assetName = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "ddos-windows-aarch64.exe" } else { "ddos-windows-x86_64.exe" }
+$asset = $release.assets | Where-Object { $_.name -eq $assetName } | Select-Object -First 1
 if (-not $asset) {
     throw "No Windows release asset found. Install with: cargo install --git https://github.com/$repo.git"
 }

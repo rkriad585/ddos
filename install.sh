@@ -7,6 +7,7 @@ arch="$(uname -m)"
 
 case "$os:$arch" in
   Linux:x86_64) asset="ddos-linux-x86_64" ;;
+  Linux:aarch64) asset="ddos-linux-aarch64" ;;
   Darwin:arm64) asset="ddos-macos-aarch64" ;;
   Darwin:x86_64) asset="ddos-macos-x86_64" ;;
   *)
