@@ -1,0 +1,13 @@
+[package]
+name = "ddos"
+version = "0.1.0"
+edition = "2021"
+description = "A bounded network diagnostics CLI for systems you own or are authorized to test"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/rkriad585/ddos"
+keywords = ["networking", "diagnostics", "cli"]
+
+[[bin]]
+name = "ddos"
+path = "src/main.rs"
