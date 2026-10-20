@@ -48,7 +48,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo build --release
 ```
 
-Tagged releases (`v0.1.0`, for example) are built for Linux, Windows, macOS,
+The `v0.0.1-beta` release is built for Linux, Windows, macOS,
 Nix, and Android/Termux by [the release workflow](.github/workflows/release.yml),
 with SHA-256 checksums attached to the GitHub release.
 
