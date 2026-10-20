@@ -4,10 +4,10 @@
 
 No. The implementation performs bounded DNS, TCP, and HTTP diagnostics only.
 
-## Does `http-check` support HTTPS?
+## Does `diagnose` support HTTPS?
 
-No. The current implementation uses the Rust standard library and sends an
-unencrypted HTTP request. HTTPS support is not implemented.
+Yes. `diagnose https://...` performs a bounded HTTPS request with certificate
+validation. The lower-level `http-check` command remains an HTTP check.
 
 ## Does the CLI read a configuration file?
 

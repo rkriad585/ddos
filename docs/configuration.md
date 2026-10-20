@@ -1,6 +1,8 @@
 # Configuration
 
-The CLI has no configuration file and reads no environment variables.
+The CLI currently has no configuration file and reads no environment
+variables. Use command-line options for timeout, retries, output format, and
+paths.
 
 The installers manage only their own executable directory and the PATH entries
 they add for that directory. The release and documentation workflows use

@@ -2,24 +2,27 @@
 
 This plan is based on the current Rust source, release workflow, installers,
 documentation, and a comparison with established network command-line tools.
-It is a planning document only; no product feature is implemented by this
-change.
+It is updated alongside implementation so completed work and remaining work
+stay explicit.
 
 ## 1. Research summary
 
 ### What the project is today
 
-`ddos` is a dependency-free Rust 2021 binary with four operational paths:
+`ddos` is a Rust 2021 binary with bounded DNS, TCP, HTTP, HTTPS, batch, and
+repeat diagnostic paths:
 
 - `resolve <host>` uses the operating system resolver and prints IP addresses.
 - `tcp-check <host> <port>` attempts bounded TCP connections to resolved
   addresses.
-- `http-check <host> [port]` sends one raw HTTP `HEAD` request over TCP.
+- `http-check <host> [port]` sends one HTTP `HEAD` request.
+- `diagnose`, `batch`, and `repeat` combine bounded checks for operators and
+  automation.
 - `self-update` and `self-uninstall` manage the installed executable.
 
-The current implementation intentionally performs one lookup, connection, or
-request at a time. It does not flood, spoof, randomize targets, scan ranges,
-or create concurrent traffic. Releases provide native binaries for the
+Single-target commands intentionally perform bounded operations. Batch mode
+uses at most eight workers for explicitly provided targets; it does not flood,
+spoof, randomize targets, or scan ranges. Releases provide native binaries for the
 platforms declared in `.github/workflows/release.yml`, and the installers
 verify release checksums before installing into the managed user directory.
 
@@ -28,7 +31,7 @@ verify release checksums before installing into the managed user directory.
 The project can be useful for an operator who needs a small diagnostic binary
 without installing a large scanner or runtime. Its current value is:
 
-1. A single portable executable with no runtime dependencies.
+1. A single portable executable with a small Rustls/JSON runtime dependency set.
 2. A simple install/update/uninstall path for Linux, macOS, Windows, Termux,
    and the published Nix package.
 3. Bounded checks that are safer and easier to explain than an open-ended
@@ -59,12 +62,8 @@ the current documentation.
 - The name `ddos` suggests traffic flooding even though the implementation is
   deliberately bounded. This can confuse operators, security reviewers,
   package indexes, and first-time users.
-- `http-check` only speaks plain HTTP over TCP. It cannot check HTTPS, TLS
-  negotiation, certificates, redirects, response headers, or a response body.
-- There is no machine-readable output. Human strings such as `open` and
-  `closed/unreachable` are difficult to consume reliably from CI and scripts.
-- There is no single command that answers “what is wrong with this endpoint?”
-  Users must manually combine resolution, TCP, and HTTP commands.
+- `http-check` remains plain HTTP; HTTPS is available through `diagnose`, but
+  certificate metadata and advanced request controls are still limited.
 - Errors do not consistently expose the address family, elapsed time, phase,
   or a stable error category. This makes failures harder to compare and
   troubleshoot.
@@ -76,8 +75,8 @@ the current documentation.
   summary of every attempted address.
 - HTTP checks use the first resolved address only and do not support explicit
   IPv4/IPv6 selection.
-- There are no retries, backoff, repeat/interval checks, batch input, or
-  bounded parallelism for authorized operational checks.
+- Advanced request controls, certificate metadata, and shell completions are
+  still missing.
 - The CLI parser is handwritten and does not provide shell completions,
   consistent option help, or a global option model.
 - There is no configuration file or environment-variable override for common
@@ -85,9 +84,8 @@ the current documentation.
 
 ### Correctness and trust issues to resolve first
 
-- `Cargo.toml` declares `license = "MIT"`, while `LICENSE` is GNU GPL v3 and
-  the README badge says GPL-3.0. This must be resolved by the project owner
-  before publishing more packages or adding dependencies.
+- License metadata is aligned to GPL-3.0-only, matching `LICENSE` and the
+  README badge.
 - `self-update` executes a downloaded installer through `curl | bash` or
   PowerShell. The installer verifies the release checksum, but the update
   path should be documented and hardened before being promoted as a trusted
@@ -126,10 +124,9 @@ explicitly requested target and a small, fixed sequence of checks:
 
 ## 4. Prioritized implementation roadmap
 
-### Phase 0 — correctness and contract cleanup
+### Phase 0 — correctness and contract cleanup (complete)
 
-- Decide whether the project is MIT or GPL-3.0 and make `Cargo.toml`,
-  `LICENSE`, badges, release metadata, and documentation agree.
+- `Cargo.toml`, `LICENSE`, badges, and documentation now agree on GPL-3.0-only.
 - Decide whether `ddos` remains the public binary name. If it remains, add a
   clear safety-oriented description everywhere; do not silently rename release
   assets.
@@ -140,7 +137,7 @@ explicitly requested target and a small, fixed sequence of checks:
   plus IPv6 cases.
 - Define exit-code meanings and document them before adding output formats.
 
-### Phase 1 — scriptable diagnostics
+### Phase 1 — scriptable diagnostics (mostly complete)
 
 - Add `--output text|json` with JSON written to stdout and diagnostics written
   to stderr.
@@ -152,7 +149,7 @@ explicitly requested target and a small, fixed sequence of checks:
   Nushell if the chosen argument parser supports it.
 - Add examples for CI, monitoring, and `jq` consumption.
 
-### Phase 2 — one powerful bounded command
+### Phase 2 — one powerful bounded command (complete)
 
 - Add `diagnose` as the unified workflow for one host or URL.
 - Keep limits explicit: one target per invocation, bounded timeout, bounded
@@ -163,7 +160,7 @@ explicitly requested target and a small, fixed sequence of checks:
 - Make the command usable both interactively and in CI with the same result
   model.
 
-### Phase 3 — modern HTTP and TLS support
+### Phase 3 — modern HTTP and TLS support (partially complete)
 
 - Add HTTPS with certificate validation enabled by default.
 - Report certificate subject, issuer, expiry, and verification result without
@@ -175,7 +172,7 @@ explicitly requested target and a small, fixed sequence of checks:
 - Document proxy behavior and whether system proxy settings are supported;
   leave a TODO until an implementation is selected.
 
-### Phase 4 — operational workflows
+### Phase 4 — operational workflows (mostly complete)
 
 - Add bounded batch input from a file or stdin, with a documented maximum
   target count and no implicit network expansion.
@@ -249,15 +246,12 @@ The first implementation milestone is complete when:
 
 ## 8. Open decisions / TODOs
 
-- TODO: Project owner must choose MIT or GPL-3.0.
 - TODO: Decide whether to keep the `ddos` name or introduce a safer product
   name while preserving a compatibility alias.
-- TODO: Choose a maintained Rust HTTP/TLS implementation only after confirming
-  the desired license, binary-size impact, and cross-compilation support.
-- TODO: Choose the argument-parser strategy and completion format.
-- TODO: Define the exact JSON schema and exit-code table.
-- TODO: Define the maximum batch size, retry count, concurrency, and repeat
-  duration.
+- TODO: Add certificate subject, issuer, and expiry reporting.
+- TODO: Add request method selection, expected-status checks, selected headers,
+  and explicit redirect controls.
+- TODO: Add shell completion scripts or migrate to a completion-capable parser.
 - TODO: Decide whether proxy support is required.
 
 [Back to README](README.md)

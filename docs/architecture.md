@@ -1,6 +1,7 @@
 # Architecture
 
-The project is a single Rust binary with no runtime crate dependencies.
+The project is a single Rust binary with a small runtime dependency set for
+JSON serialization and Rustls-backed HTTP/HTTPS requests.
 
 ```text
 .
@@ -16,8 +17,8 @@ The project is a single Rust binary with no runtime crate dependencies.
 └── docs/                      MkDocs source
 ```
 
-Network operations use the Rust standard library: DNS resolution through
-`ToSocketAddrs`, bounded TCP connections through `TcpStream`, and one HTTP
-`HEAD` request over a TCP stream.
+DNS resolution through `ToSocketAddrs` and bounded TCP connections through
+`TcpStream` use the Rust standard library. HTTP and HTTPS requests use the
+Rustls-backed `ureq` client with certificate validation and bounded redirects.
 
 [Back to README](https://github.com/rkriad585/ddos/blob/main/README.md)

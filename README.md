@@ -19,8 +19,8 @@
   <a href="https://github.com/rkriad585"><img src="https://img.shields.io/badge/made%20by-rkriad585-lightgrey" alt="Made by rkriad585"></a>
 </p>
 
-`ddos` is a dependency-free Rust command-line tool for one-shot DNS, TCP, and
-HTTP diagnostics. It deliberately avoids flooding, spoofing, evasion, and
+`ddos` is a Rust command-line tool for bounded DNS, TCP, HTTP, and HTTPS
+diagnostics. It deliberately avoids flooding, spoofing, evasion, and
 unbounded traffic generation.
 
 ## Screenshot
@@ -59,6 +59,9 @@ aligned with the implemented commands.
 - DNS resolution through the operating system resolver.
 - One bounded TCP connection check with a configurable 1–120 second timeout.
 - One HTTP `HEAD` request with an optional path and timeout.
+- Unified HTTPS/TLS diagnostics with bounded redirects and validated
+  certificates.
+- JSON output, bounded retries, batch checks, and repeat monitoring.
 - Self-update through the official platform installer.
 - Self-uninstall of the current executable.
 - Release binaries for Linux, Windows, macOS, Android/Termux, and Nix.
@@ -92,6 +95,7 @@ Release installers use `~/.config/peekstore/ddos/` on Unix-like systems and
 ddos resolve localhost
 ddos tcp-check example.com 443 --timeout 5
 ddos http-check example.com --path / --timeout 5
+ddos diagnose https://example.com --output json
 ```
 
 ## Usage examples
@@ -103,6 +107,9 @@ Usage:
   ddos resolve <host>
   ddos tcp-check <host> <port> [--timeout <seconds>]
   ddos http-check <host> [port] [--path <path>] [--timeout <seconds>]
+  ddos diagnose <url|host:port> [--timeout <seconds>] [--retry <count>] [--output text|json]
+  ddos batch <file|-> [--timeout <seconds>] [--retry <count>] [--output text|json]
+  ddos repeat <url|host:port> --interval <seconds> --duration <seconds> [options]
   ddos self-update
   ddos self-uninstall
   ddos --version
@@ -155,8 +162,8 @@ src/main.rs
 └── installer maintenance commands
 ```
 
-The binary has no Cargo dependencies; all runtime networking uses the Rust
-standard library.
+DNS and TCP checks use the Rust standard library. HTTP and HTTPS diagnostics
+use the Rustls-backed `ureq` client with certificate validation.
 
 ## Requirements
 

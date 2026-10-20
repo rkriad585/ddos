@@ -3,10 +3,15 @@ name = "ddos"
 version = "0.0.1-beta"
 edition = "2021"
 description = "A bounded network diagnostics CLI for systems you own or are authorized to test"
-license = "MIT"
+license = "GPL-3.0-only"
 readme = "README.md"
 repository = "https://github.com/rkriad585/ddos"
 keywords = ["networking", "diagnostics", "cli"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
 
 [[bin]]
 name = "ddos"

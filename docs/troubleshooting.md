@@ -8,7 +8,8 @@ the release installer.
 ## DNS resolution fails
 
 Check the hostname, local resolver, and network policy. `resolve` uses the
-operating system resolver through Rust's standard library.
+operating system resolver through Rust's standard library. HTTPS checks also
+require a valid certificate chain trusted by the bundled Rustls roots.
 
 ## TCP or HTTP checks fail
 
