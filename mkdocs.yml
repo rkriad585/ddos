@@ -8,8 +8,8 @@ site_dir: site
 
 theme:
   name: void
-  logo: assets/logo-light.svg
-  favicon: assets/favicon.svg
+  logo: assets/icon-on-light-mode.svg
+  favicon: assets/favicon-on-light-mode.svg
   language: en
   palette:
     - scheme: slate
@@ -68,8 +68,10 @@ theme:
       background_color: "#111114"
 
 extra:
-  void_logo_light: assets/logo-light.svg
-  void_logo_dark: assets/logo-dark.svg
+  void_logo_light: assets/icon-on-light-mode.svg
+  void_logo_dark: assets/icon-on-dark-mode.svg
+  void_favicon_light: assets/favicon-on-light-mode.svg
+  void_favicon_dark: assets/favicon-on-dark-mode.svg
   void_og_image: __auto__
   void_site_tagline: Bounded network diagnostics for authorized testing
   void_theme_color: "#ff3030"

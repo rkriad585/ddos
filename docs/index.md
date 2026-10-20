@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="ddos logo" height="150">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-on-dark-mode-1280x640.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo-on-light-mode-1280x640.svg">
+    <img src="assets/logo-on-light-mode-1280x640.svg" alt="ddos logo" width="80%">
+  </picture>
 </p>
 
 # ddos documentation
