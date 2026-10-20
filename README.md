@@ -56,14 +56,24 @@ aligned with the implemented commands.
 
 ## Key features
 
-- DNS resolution through the operating system resolver.
+- DNS resolution through the operating system resolver, with IPv4/IPv6
+  selection.
 - One bounded TCP connection check with a configurable 1–120 second timeout.
-- One HTTP `HEAD` request with an optional path and timeout.
-- Unified HTTPS/TLS diagnostics with bounded redirects and validated
-  certificates.
-- JSON output, bounded retries, batch checks, and repeat monitoring.
-- Certificate metadata, expected-status checks, selected response headers,
-  redirect limits, proxy support, and shell completions.
+- One HTTP `HEAD`/`GET` request with custom headers, Basic/Bearer auth,
+  user-agent override, and an optional bounded body read (max 1 MiB).
+- Unified HTTPS/TLS diagnostics with bounded redirects, validated
+  certificates, and certificate metadata (subject, issuer, serial, SANs,
+  expiry).
+- Bounded UDP probe checks with configurable payloads.
+- Built-in DNS record lookups (`A`, `AAAA`, `CNAME`, `TXT`, `MX`, `NS`).
+- JSON, JSON Lines, CSV, and text output; bounded retries; batch checks; and
+  repeat monitoring.
+- Consent-gated load testing with hard loopback, rate (50 req/s), and volume
+  (5000 requests) caps, plus per-request user-agent rotation.
+- Layered configuration: CLI args > `DDOS_*` env vars >
+  `~/.config/ddos/config.toml`.
+- Certificate status checks, expected-status checks, selected response
+  headers, redirect limits, proxy support, and shell completions.
 - Self-update through the official platform installer.
 - Self-uninstall of the current executable.
 - Release binaries for Linux, Windows, macOS, Android/Termux, and Nix.
@@ -106,16 +116,27 @@ ddos diagnose https://example.com --output json
 ddos 0.0.2-beta — bounded network diagnostics
 
 Usage:
-  ddos resolve <host>
-  ddos tcp-check <host> <port> [--timeout <seconds>]
-  ddos http-check <host> [port] [--path <path>] [--timeout <seconds>]
-  ddos diagnose <url|host:port> [--timeout <seconds>] [--retry <count>] [--output text|json]
-  ddos batch <file|-> [--timeout <seconds>] [--retry <count>] [--output text|json]
+  ddos resolve <host> [options]
+  ddos tcp-check <host> <port> [--timeout <seconds>] [--retry <count>] [options]
+  ddos http-check <host> [port] [--path /path] [--method HEAD|GET] [options]
+  ddos diagnose <url|host:port> [--method HEAD|GET] [--expect-status <code>] [options]
+  ddos udp-check <host> <port> [--payload <hex>] [--retry <count>] [options]
+  ddos dns-check <host> [--dns-type <type>] [--dns-server <ip>] [options]
+  ddos batch <file|-> [--timeout <seconds>] [--retry <count>] [options]
   ddos repeat <url|host:port> --interval <seconds> --duration <seconds> [options]
+  ddos load-test <url|host:port> [--rate <req/s>] [--count <requests>] [options]
   ddos self-update
   ddos self-uninstall
   ddos --version
   ddos --help
+```
+
+Example scripted diagnostics:
+
+```sh
+ddos diagnose https://api.example.com --auth bearer "$TOKEN" --show-header server
+ddos dns-check example.com --dns-type TXT --output json | jq '.answers'
+ddos udp-check 1.1.1.1 53 --timeout 3 --output jsonl
 ```
 
 Maintenance commands:
@@ -157,10 +178,12 @@ exit status for invalid input or failed checks. See the [CLI reference](docs/cli
 
 ```text
 src/main.rs
-├── argument dispatch
+├── argument dispatch and layered options (CLI > env > config file)
 ├── DNS resolution (ToSocketAddrs)
 ├── TCP checks (TcpStream)
-├── HTTP HEAD checks (TcpStream)
+├── HTTP HEAD/GET checks (TcpStream)
+├── UDP probes (UdpSocket)
+├── minimal DNS-over-UDP record lookups
 └── installer maintenance commands
 ```
 
