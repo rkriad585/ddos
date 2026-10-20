@@ -11,13 +11,11 @@
       packages = forAllSystems (system:
         let pkgs = import nixpkgs { inherit system; };
         in {
-          default = pkgs.stdenv.mkDerivation {
+          default = pkgs.rustPlatform.buildRustPackage {
             pname = "ddos";
-            version = "0.0.0-beta-2";
+            version = "0.0.2-beta";
             src = ./.;
-            nativeBuildInputs = [ pkgs.rustc pkgs.cargo ];
-            buildPhase = "cargo build --release --locked --offline";
-            installPhase = "mkdir -p $out/bin; cp target/release/ddos $out/bin/ddos";
+            cargoLock.lockFile = ./Cargo.lock;
           };
         });
     };

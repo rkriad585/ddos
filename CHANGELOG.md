@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.0.0-beta-2
+## 0.0.2-beta
 
+- Fixed Nix packaging to build from the committed Cargo lockfile.
 - Bumped the project version for the next beta release.
 
 ## 0.0.1-beta

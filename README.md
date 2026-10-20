@@ -14,7 +14,7 @@
   <a href="https://github.com/rkriad585/ddos/actions/workflows/release.yml"><img src="https://github.com/rkriad585/ddos/actions/workflows/release.yml/badge.svg" alt="Release workflow"></a>
   <a href="https://github.com/rkriad585/ddos/actions/workflows/docs.yml"><img src="https://github.com/rkriad585/ddos/actions/workflows/docs.yml/badge.svg" alt="Documentation workflow"></a>
   <img src="https://img.shields.io/badge/rust-2021-orange?logo=rust" alt="Rust 2021">
-  <img src="https://img.shields.io/badge/version-0.0.0--beta--2-blue" alt="Version 0.0.0-beta-2">
+  <img src="https://img.shields.io/badge/version-0.0.2--beta-blue" alt="Version 0.0.2-beta">
   <a href="https://github.com/rkriad585/ddos/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="GPL-3.0 license"></a>
   <a href="https://github.com/rkriad585"><img src="https://img.shields.io/badge/made%20by-rkriad585-lightgrey" alt="Made by rkriad585"></a>
 </p>
@@ -103,7 +103,7 @@ ddos diagnose https://example.com --output json
 ## Usage examples
 
 ```text
-ddos 0.0.0-beta-2 — bounded network diagnostics
+ddos 0.0.2-beta — bounded network diagnostics
 
 Usage:
   ddos resolve <host>
