@@ -1,7 +1,11 @@
 # ddos
 
 <p align="center">
-  <img src="ddos-logos/logo-on-light-mode.svg" alt="ddos logo" height="150">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="ddos-logos/logo-on-dark-mode.svg">
+    <source media="(prefers-color-scheme: light)" srcset="ddos-logos/logo-on-light-mode.svg">
+    <img src="ddos-logos/logo-on-light-mode.svg" alt="ddos logo" height="150">
+  </picture>
   <h1 align="center">ddos</h1>
   <p align="center">Bounded network diagnostics for systems you own or are authorized to test.</p>
 </p>
@@ -21,9 +25,18 @@ unbounded traffic generation.
 
 ## Screenshot
 
-The project is a terminal CLI. A generated help screenshot is documented in
-[`docs/screenshots.md`](docs/screenshots.md); the source generator is
-[`tools/screenshots_gen.py`](tools/screenshots_gen.py).
+<p align="center">
+  <img src="Screenshots/home.png" alt="ddos command-line help" width="80%">
+</p>
+
+<p align="center">
+  <em>Real output from <code>ddos --help</code>. More details are available in
+  <a href="docs/screenshots.md">the screenshot documentation</a>.</em>
+</p>
+
+The image is generated from the current CLI by
+[`tools/screenshots_gen.py`](tools/screenshots_gen.py) using Pillow, so it stays
+aligned with the implemented commands.
 
 ## Table of contents
 
