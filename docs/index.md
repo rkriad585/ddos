@@ -1,9 +1,12 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-on-dark-mode-1280x640.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/logo-on-light-mode-1280x640.svg">
-    <img src="assets/logo-on-light-mode-1280x640.svg" alt="ddos logo" width="80%">
-  </picture>
+  <img
+    id="ddos-home-logo"
+    src="assets/logo-on-light-mode-1280x640.svg"
+    data-logo-light="assets/logo-on-light-mode-1280x640.svg"
+    data-logo-dark="assets/logo-on-dark-mode-1280x640.svg"
+    alt="ddos logo"
+    width="80%"
+  >
 </p>
 
 # ddos documentation

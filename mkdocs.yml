@@ -76,6 +76,9 @@ extra:
   void_site_tagline: Bounded network diagnostics for authorized testing
   void_theme_color: "#ff3030"
 
+extra_javascript:
+  - assets/theme-logo.js
+
 markdown_extensions:
   - admonition
   - footnotes
