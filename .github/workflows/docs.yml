@@ -33,6 +33,8 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-docs.txt
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - name: Install documentation dependencies
         run: python -m pip install --upgrade pip && python -m pip install -r requirements-docs.txt
       - name: Build documentation
