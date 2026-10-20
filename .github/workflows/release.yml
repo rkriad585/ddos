@@ -81,6 +81,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: Install Android NDK
         run: sdkmanager "platform-tools" "platforms;android-34" "ndk;27.2.12479018"
       - uses: dtolnay/rust-toolchain@stable

@@ -13,7 +13,7 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/rkriad585/ddos/main/install.ps1 | iex
 ```
 
-Linux/macOS:
+Linux/macOS/Termux:
 
 ```sh
 curl -sL https://raw.githubusercontent.com/rkriad585/ddos/main/install.sh | bash
