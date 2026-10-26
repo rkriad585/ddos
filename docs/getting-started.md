@@ -32,9 +32,43 @@ ddos dns-check example.com --dns-type A --dns-server 1.1.1.1
 #   A example.com ttl 119s 172.66.147.243
 #   A example.com ttl 119s 104.20.23.154
 
+# TLS certificate metadata for a host (port defaults to 443)
+ddos tls-check example.com
+
+# Inspect the realistic browser user-agent pool
+ddos user-agents --output csv
+
+# Generate a starter config file and install shell completion
+ddos config init
+ddos completion bash > ~/.local/share/bash-completion/completions/ddos
+
 # Machine-readable formats: json, jsonl, csv
 ddos diagnose https://example.com --output jsonl | head -1
 ```
+
+## Authorized assessment workflow
+
+For an engagement, write an explicit scope file first and pass it to every
+network command. The tool fails closed if a target is outside the allowlist:
+
+```text
+# scope.txt
+client.example
+*.client.example
+192.0.2.0/24
+```
+
+```sh
+ddos diagnose https://client.example --scope scope.txt \
+  --audit-log engagement.jsonl
+ddos http-check client.example --scope scope.txt --audit-headers
+ddos tls-check client.example --scope scope.txt --output json
+ddos report https://client.example --scope scope.txt > assessment.md
+```
+
+`--audit-log` appends a JSONL record with the command, target, status, exit
+code, and error. Credentials are not logged. Use `--audit-headers` to list
+common HTTP security headers as present or missing.
 
 ## Load-test a local server
 

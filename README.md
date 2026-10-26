@@ -63,17 +63,40 @@ aligned with the implemented commands.
   user-agent override, and an optional bounded body read (max 1 MiB).
 - Unified HTTPS/TLS diagnostics with bounded redirects, validated
   certificates, and certificate metadata (subject, issuer, serial, SANs,
-  expiry).
+  expiry, negotiated protocol, and cipher suite).
+- Standalone `tls-check` for certificate metadata without an HTTP report.
+- `--audit-headers` reports common HTTP security headers with a weighted
+  0–100 score and A–F grade for quick defensive review.
+- `ddos report <url|host:port>` generates a Markdown assessment report with
+  DNS/TCP/HTTP/TLS results, security-header findings, and a security grade.
+- Bounded TCP `port-scan` with CSV/range specs, concurrency limits, and an
+  explicit scope requirement for non-loopback targets.
+- `path-discovery` with a built-in wordlist or custom `--wordlist`, reporting
+  interesting status codes without following redirects.
+- `cors-check` and `cookie-check` for CORS misconfigurations and cookie flag
+  problems, including `__Host-`/`__Secure-` prefix validation.
+- `method-check` audits `OPTIONS`/`HEAD`/`TRACE`, the `Allow` header, advertised
+  state-changing methods, and cross-site tracing without sending unsafe verbs.
+- `--expect-status` now works for 4xx and 5xx responses, including bounded
+  body previews.
+- Authorization scope files (`--scope`) restrict every network target to an
+  explicit host, wildcard domain, IP, or CIDR allowlist.
+- JSONL audit logs (`--audit-log`) record command, target, status, and exit
+  code without logging credentials.
 - Bounded UDP probe checks with configurable payloads.
 - Built-in DNS record lookups (`A`, `AAAA`, `CNAME`, `TXT`, `MX`, `NS`).
 - JSON, JSON Lines, CSV, and text output; bounded retries; batch checks; and
   repeat monitoring.
 - Consent-gated load testing with hard loopback, rate (50 req/s), and volume
-  (5000 requests) caps, plus per-request user-agent rotation.
+  (5000 requests) caps, plus rotating or randomized realistic browser
+  user-agent selection.
+- Built-in `user-agents` command to inspect the browser agent pool.
 - Layered configuration: CLI args > `DDOS_*` env vars >
-  `~/.config/ddos/config.toml`.
+  `~/.config/ddos/config.toml`, with `config path` and `config init` helpers.
 - Certificate status checks, expected-status checks, selected response
-  headers, redirect limits, proxy support, and shell completions.
+  headers, redirect limits, proxy support, and embedded shell completions.
+- `--quiet` for exit-code-only text runs and `--no-color` for compatibility
+  with plain-text pipelines.
 - Self-update through the official platform installer.
 - Self-uninstall of the current executable.
 - Release binaries for Linux, Windows, macOS, Android/Termux, and Nix.
@@ -120,11 +143,21 @@ Usage:
   ddos tcp-check <host> <port> [--timeout <seconds>] [--retry <count>] [options]
   ddos http-check <host> [port] [--path /path] [--method HEAD|GET] [options]
   ddos diagnose <url|host:port> [--method HEAD|GET] [--expect-status <code>] [options]
+  ddos report <url|host:port> [options]
   ddos udp-check <host> <port> [--payload <hex>] [--retry <count>] [options]
   ddos dns-check <host> [--dns-type <type>] [--dns-server <ip>] [options]
+  ddos tls-check <host> [port] [options]
+  ddos user-agents [--output text|json|jsonl|csv]
   ddos batch <file|-> [--timeout <seconds>] [--retry <count>] [options]
   ddos repeat <url|host:port> --interval <seconds> --duration <seconds> [options]
   ddos load-test <url|host:port> [--rate <req/s>] [--count <requests>] [options]
+  ddos port-scan <host> [--ports <spec>] [--concurrency <n>] [options]
+  ddos path-discovery <url|host:port> [--wordlist <file>] [options]
+  ddos cors-check <url|host:port> [--origin <origin>] [options]
+  ddos cookie-check <url|host:port> [options]
+  ddos method-check <url|host:port> [options]
+  ddos completion <bash|zsh|fish|powershell|nushell>
+  ddos config <path|init>
   ddos self-update
   ddos self-uninstall
   ddos --version
@@ -137,6 +170,14 @@ Example scripted diagnostics:
 ddos diagnose https://api.example.com --auth bearer "$TOKEN" --show-header server
 ddos dns-check example.com --dns-type TXT --output json | jq '.answers'
 ddos udp-check 1.1.1.1 53 --timeout 3 --output jsonl
+ddos tls-check example.com 443 --output json
+ddos user-agents --output csv
+ddos report https://example.com > assessment.md
+ddos port-scan 127.0.0.1 --ports 3030,3043,8080 --output json
+ddos path-discovery http://127.0.0.1:3030 --output json
+ddos cors-check http://127.0.0.1:3030/api/users --output json
+ddos cookie-check http://127.0.0.1:3030/api/login --output json
+ddos method-check http://127.0.0.1:3030/api/users --output json
 ```
 
 Sample output from a healthy HTTPS target:
@@ -152,7 +193,36 @@ HTTP: 200 OK
   content-type: text/html; charset=utf-8
 TLS: CN=example.com -> C=US, O=SSL Corporation, CN=Cloudflare TLS Issuing ECC CA 3 (expires Dec 25 22:56:35 2026 +00:00) serial 01:ee:e6:aa:bb:52:1d:5e:14:fc:31:5f:d9:98:56:90
   SANs: example.com, *.example.com
+  TLS protocol: TLSv1_3
+  cipher suite: TLS13_AES_256_GCM_SHA384
 ```
+
+Authorized-assessment workflow with an explicit scope and audit trail:
+
+```sh
+cat > scope.txt <<'EOF'
+# Only these targets are authorized for this engagement.
+client.example
+*.client.example
+192.0.2.0/24
+EOF
+
+ddos diagnose https://client.example --scope scope.txt --audit-log engagement.jsonl
+ddos http-check client.example --scope scope.txt --audit-headers
+ddos tls-check client.example --scope scope.txt --output json
+ddos report https://client.example --scope scope.txt > assessment.md
+ddos port-scan client.example --ports 1-1000 --scope scope.txt
+ddos path-discovery https://client.example --scope scope.txt --output json
+ddos cors-check https://client.example/api --scope scope.txt
+ddos cookie-check https://client.example/login --scope scope.txt
+ddos method-check https://client.example/api --scope scope.txt
+```
+
+`--scope` fails closed: any target outside the file returns exit code 2 before
+the diagnostic runs. Scope entries are exact hosts, `*.domain` subdomains,
+IP addresses, or CIDR ranges; `#` starts a comment. When a scope file is
+active, HTTP redirects are not followed so a redirect cannot leave the
+authorized scope.
 
 Loopback load testing against a local dev server (loopback targets only):
 
@@ -168,6 +238,14 @@ Maintenance commands:
 ```sh
 ddos self-update
 ddos --selfuninstall
+```
+
+Shell and configuration helpers:
+
+```sh
+ddos completion bash > ~/.local/share/bash-completion/completions/ddos
+ddos config path
+ddos config init
 ```
 
 The installer-based uninstall command also removes the managed PATH entries:
@@ -208,6 +286,7 @@ src/main.rs
 ├── HTTP HEAD/GET checks (TcpStream)
 ├── UDP probes (UdpSocket)
 ├── minimal DNS-over-UDP record lookups
+├── TLS certificate inspection
 └── installer maintenance commands
 ```
 
@@ -248,7 +327,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Security
 
 See [SECURITY.md](SECURITY.md). Use this software only for authorized
-diagnostics.
+diagnostics. Prefer `--scope` to enforce an explicit target allowlist and
+`--audit-log` to keep a per-run engagement trail.
 
 ## License
 

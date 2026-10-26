@@ -8,6 +8,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -27,10 +28,96 @@ const MAX_LOAD_RATE: u64 = 50;
 const MAX_LOAD_COUNT: u64 = 5000;
 const DEFAULT_LOAD_RATE: u64 = 10;
 const DEFAULT_LOAD_COUNT: u64 = 20;
+const MAX_CAPACITY_STEPS: u64 = 10;
+const MAX_CAPACITY_REQUESTS: u64 = 2000;
+const MAX_CHURN_CONNECTIONS: u64 = 1000;
+const MAX_SLOW_CLIENTS: u64 = 8;
+const MAX_SLOW_HOLD_SECONDS: u64 = 10;
+const MAX_SHAPE_REQUESTS: u64 = 500;
+const DEGRADED_ERROR_PERCENT: u64 = 20;
+const DEGRADED_LATENCY_MS: u128 = 1000;
 const MAX_HEADERS: usize = 20;
 const MAX_HEADER_NAME: usize = 64;
 const MAX_HEADER_VALUE: usize = 2048;
 const MAX_AUTH_VALUE: usize = 1024;
+const MAX_PORT_SCAN_PORTS: usize = 1000;
+const MAX_PORT_SCAN_ADDRESSES: usize = 4;
+const MAX_PORT_SCAN_TIMEOUT_SECONDS: u64 = 3;
+const MAX_PATH_DISCOVERY_PATHS: usize = 200;
+const PATH_DISCOVERY_DELAY_MS: u64 = 25;
+const DEFAULT_CORS_ORIGIN: &str = "https://evil.example";
+const DEFAULT_SCAN_PORTS: &str = "21,22,23,25,53,80,110,111,135,139,143,443,445,993,995,1080,1433,1521,1723,2049,2375,2376,3000,3030,3043,3053,3306,3389,5000,5432,5900,6379,8000,8008,8080,8081,8443,8888,9000,9090,9200,9300,10000,11211,27017";
+const DEFAULT_DISCOVERY_PATHS: [&str; 69] = [
+    "/",
+    "/admin",
+    "/admin/login",
+    "/login",
+    "/dashboard",
+    "/debug",
+    "/metrics",
+    "/health",
+    "/healthz",
+    "/status",
+    "/ping",
+    "/version",
+    "/info",
+    "/config",
+    "/settings",
+    "/system",
+    "/internal",
+    "/private",
+    "/secret",
+    "/token",
+    "/tokens",
+    "/api",
+    "/api/v1",
+    "/api/docs",
+    "/api/users",
+    "/api/private",
+    "/api/admin",
+    "/api/login",
+    "/graphql",
+    "/graphiql",
+    "/swagger",
+    "/swagger-ui",
+    "/openapi.json",
+    "/docs",
+    "/robots.txt",
+    "/sitemap.xml",
+    "/.env",
+    "/.git/config",
+    "/.well-known/security.txt",
+    "/server-status",
+    "/actuator",
+    "/actuator/health",
+    "/console",
+    "/phpmyadmin",
+    "/wp-admin",
+    "/backup",
+    "/backup.zip",
+    "/download",
+    "/export",
+    "/files",
+    "/uploads",
+    "/static",
+    "/assets",
+    "/users",
+    "/user",
+    "/account",
+    "/accounts",
+    "/orders",
+    "/profile",
+    "/session",
+    "/sessions",
+    "/cookies",
+    "/set-cookie",
+    "/cors",
+    "/headers",
+    "/headers/none",
+    "/redirect",
+    "/stress",
+    "/slow",
+];
 const MAX_UDP_PAYLOAD: usize = 1400;
 const UDP_PREVIEW_BYTES: usize = 256;
 const MAX_DNS_LABEL: usize = 63;
@@ -39,6 +126,11 @@ const CONFIG_DIR_NAME: &str = "ddos";
 const CONFIG_FILE_NAME: &str = "config.toml";
 const INSTALL_SH: &str = "https://raw.githubusercontent.com/rkriad585/ddos/main/installer.sh";
 const INSTALL_PS1: &str = "https://raw.githubusercontent.com/rkriad585/ddos/main/installer.ps1";
+const COMPLETION_BASH: &str = include_str!("../completions/ddos.bash");
+const COMPLETION_ZSH: &str = include_str!("../completions/ddos.zsh");
+const COMPLETION_FISH: &str = include_str!("../completions/ddos.fish");
+const COMPLETION_POWERSHELL: &str = include_str!("../completions/ddos.ps1");
+const COMPLETION_NUSHELL: &str = include_str!("../completions/ddos.nu");
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Output {
@@ -198,6 +290,7 @@ struct Options {
     retries: u32,
     output: Output,
     verbose: bool,
+    quiet: bool,
     path: String,
     method: String,
     expect_status: Option<u16>,
@@ -214,7 +307,35 @@ struct Options {
     dns_server: Option<IpAddr>,
     rate: u32,
     count: u32,
+    steps: u32,
+    clients: u32,
+    hold_seconds: u64,
     rotate_user_agent: bool,
+    random_user_agent: bool,
+    audit_headers: bool,
+    concurrency: u32,
+    ports: Option<String>,
+    wordlist: Option<PathBuf>,
+    origin: Option<String>,
+    skip_certificate: bool,
+    show_all_headers: bool,
+    scope: Option<Scope>,
+    scope_path: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+struct Scope {
+    source: PathBuf,
+    hosts: Vec<String>,
+    networks: Vec<(IpAddr, u8)>,
+    addresses: Vec<IpAddr>,
+}
+
+#[derive(Serialize, Clone)]
+struct HeaderCheck {
+    name: String,
+    present: bool,
+    value: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -239,6 +360,9 @@ struct HttpResult {
     body_preview: Option<String>,
     certificate: Option<CertificateSummary>,
     certificate_error: Option<String>,
+    security_headers: Option<Vec<HeaderCheck>>,
+    security_score: Option<u8>,
+    security_grade: Option<String>,
 }
 #[derive(Serialize, Clone)]
 struct CertificateSummary {
@@ -249,6 +373,8 @@ struct CertificateSummary {
     not_before: String,
     not_after: String,
     expired: bool,
+    protocol: Option<String>,
+    cipher_suite: Option<String>,
 }
 #[derive(Serialize, Clone)]
 struct DiagnosticReport {
@@ -317,6 +443,25 @@ struct DnsReport {
     error: Option<String>,
 }
 
+#[derive(Serialize)]
+struct TlsReport {
+    schema_version: u8,
+    version: String,
+    host: String,
+    port: u16,
+    certificate: Option<CertificateSummary>,
+    ok: bool,
+    total_elapsed_ms: u128,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct UserAgentsReport {
+    schema_version: u8,
+    version: String,
+    user_agents: Vec<String>,
+}
+
 fn usage() {
     let text = format!(
         "ddos {VERSION} — bounded network diagnostics
@@ -326,11 +471,25 @@ Usage:
   ddos tcp-check <host> <port> [--timeout <seconds>] [--retry <count>] [options]
   ddos http-check <host> [port] [--path /path] [--method HEAD|GET] [options]
   ddos diagnose <url|host:port> [--method HEAD|GET] [--expect-status <code>] [options]
+  ddos report <url|host:port> [options]
   ddos udp-check <host> <port> [--payload <hex>] [--retry <count>] [options]
   ddos dns-check <host> [--dns-type <type>] [--dns-server <ip>] [options]
+  ddos tls-check <host> [port] [options]
+  ddos user-agents [--output text|json|jsonl|csv]
   ddos batch <file|-> [--timeout <seconds>] [--retry <count>] [options]
   ddos repeat <url|host:port> --interval <seconds> --duration <seconds> [options]
   ddos load-test <url|host:port> [--rate <req/s>] [--count <requests>] [options]
+  ddos capacity-test <url|host:port> [--rate <req/s>] [--steps <n>] [--count <requests>] [options]
+  ddos connection-churn <host> <port> [--count <connections>] [--rate <conn/s>] [options]
+  ddos slow-request <host> <port> [--clients <n>] [--hold <seconds>] [options]
+  ddos request-shape <url|host:port> [--count <requests>] [options]
+  ddos port-scan <host> [--ports <spec>] [--concurrency <n>] [options]
+  ddos path-discovery <url|host:port> [--wordlist <file>] [options]
+  ddos cors-check <url|host:port> [--origin <origin>] [options]
+  ddos cookie-check <url|host:port> [options]
+  ddos method-check <url|host:port> [options]
+  ddos completion <bash|zsh|fish|powershell|nushell>
+  ddos config <path|init>
   ddos self-update
   ddos self-uninstall
   ddos --version
@@ -341,6 +500,14 @@ Common options:
   --retry 0-5                   bounded retries with exponential backoff
   --output text|json|jsonl|csv  machine-readable output modes
   --family any|ipv4|ipv6        only resolve the selected address family
+  --quiet                       suppress human-readable text output
+  --no-color                    accepted for compatibility; output is plain text
+  --scope <file>                only allow targets listed in an authorization scope file
+  --audit-log <path>            append one JSONL audit record per run
+  --concurrency 1-8             worker count for port-scan (default 8)
+  --ports <spec>                ports for port-scan: 80,443,8000-8100 (max 1000)
+  --wordlist <file>             custom paths for path-discovery (max 200)
+  --origin <origin>             Origin header for cors-check (default https://evil.example)
   --config <path>               use this config file (key = value lines)
   --no-config                   skip the default config file for this run
 
@@ -354,6 +521,7 @@ HTTP options:
   --body-bytes <count>          with GET, read up to N body bytes (max {MAX_BODY_BYTES})
   --expect-status <code>        require this exact HTTP status for success
   --show-header <name>          print this response header; repeatable
+  --audit-headers               report common HTTP security headers
   --redirects 0-10              redirect limit (default 5)
   --proxy <url>                 HTTP/HTTPS proxy for the request
 
@@ -362,10 +530,38 @@ UDP/DNS options:
   --dns-type A|AAAA|CNAME|TXT|MX|NS   record type for dns-check (default A)
   --dns-server <ip>             resolver for dns-check (defaults to the system resolver on Unix)
 
+TLS check:
+  ddos tls-check <host> [port]  validated certificate metadata (default port 443)
+  ddos user-agents              list the built-in realistic browser user agents
+
+Reporting:
+  ddos report <url|host:port>   Markdown assessment report with HTTP security headers
+
 Load-test options:
   --rate 1-{MAX_LOAD_RATE}                requests per second (sequential pacing, no concurrency)
   --count 1-{MAX_LOAD_COUNT}              total requests within budget
-  --rotate-user-agent           pick a different self-identifying user agent per request
+  --rotate-user-agent           cycle through realistic browser user agents per request
+  --random-user-agent           pick a realistic browser user agent per request
+
+Recon and web security checks (bounded; non-loopback requires --scope):
+  ddos port-scan <host>         bounded TCP port scan; --ports accepts CSV and ranges
+  ddos path-discovery <url>     built-in or custom path wordlist; reports interesting statuses
+  ddos cors-check <url>         test wildcard/reflected CORS and credential combinations
+  ddos cookie-check <url>       audit Set-Cookie Secure, HttpOnly, SameSite, and prefixes
+  ddos method-check <url>       audit OPTIONS/HEAD/TRACE behavior and advertised methods
+  Limits: port-scan {MAX_PORT_SCAN_PORTS} ports x {MAX_PORT_SCAN_ADDRESSES} addresses,
+  path-discovery {MAX_PATH_DISCOVERY_PATHS} paths, 25 ms between requests.
+
+Capacity and resilience tests (loopback only):
+  ddos capacity-test <url>       ramp the rate in steps and report where the target degrades
+  ddos connection-churn <host> <port>  open and close connections to probe backlog limits
+  ddos slow-request <host> <port>     hold slow requests open to measure server timeouts
+  ddos request-shape <url>       send odd methods, paths, headers, and bodies
+  --steps 1-{MAX_CAPACITY_STEPS}       ramp steps for capacity-test
+  --clients 1-{MAX_SLOW_CLIENTS}       slow clients for slow-request
+  --hold 1-{MAX_SLOW_HOLD_SECONDS}     seconds to hold slow requests open
+  Budgets: capacity-test {MAX_CAPACITY_REQUESTS} requests, connection-churn {MAX_CHURN_CONNECTIONS} connections,
+  request-shape {MAX_SHAPE_REQUESTS} requests; all four refuse non-loopback targets.
 
 Exit codes: 0 success, 1 diagnostic failure, 2 invalid usage.
 Limits: batch 100 targets, concurrency 8, repeat 1 hour, load-test {MAX_LOAD_RATE} req/s x {MAX_LOAD_COUNT} requests, body read {MAX_BODY_BYTES} bytes.
@@ -376,7 +572,15 @@ Env vars: DDOS_TIMEOUT, DDOS_RETRIES, DDOS_OUTPUT, DDOS_PATH, DDOS_METHOD,
 DDOS_FAMILY, DDOS_EXPECT_STATUS, DDOS_REDIRECTS, DDOS_PROXY, DDOS_USER_AGENT,
 DDOS_SHOW_HEADER (comma separated), DDOS_HEADER (semicolon separated \"Name: value\" items),
 DDOS_AUTH (\"basic:USER:PASS\" or \"bearer:TOKEN\"), DDOS_BODY_BYTES,
-DDOS_RATE, DDOS_COUNT, DDOS_ROTATE_USER_AGENT (true/false).
+DDOS_DNS_TYPE, DDOS_DNS_SERVER, DDOS_PAYLOAD, DDOS_VERBOSE, DDOS_QUIET,
+DDOS_SCOPE, DDOS_AUDIT_HEADERS, DDOS_AUDIT_LOG,
+DDOS_RATE, DDOS_COUNT, DDOS_ROTATE_USER_AGENT (true/false),
+DDOS_RANDOM_USER_AGENT (true/false), DDOS_STEPS, DDOS_CLIENTS, DDOS_HOLD,
+DDOS_CONCURRENCY, DDOS_PORTS, DDOS_WORDLIST, DDOS_ORIGIN.
+
+Scope file: one host, *.domain, IP address, or CIDR range per line; # starts a comment.
+When a scope file is active, HTTP redirects are not followed.
+Audit log: JSONL with timestamp, command, target, status, and exit code (never credentials).
 
 Only use this tool against systems you own or are authorized to test."
     );
@@ -511,6 +715,74 @@ fn validate_show_header(name: &str) -> Result<String, String> {
     Ok(name)
 }
 
+fn parse_port(value: &str) -> Result<u16, String> {
+    let port = value
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| format!("invalid port: {value}"))?;
+    if port == 0 {
+        return Err("port must be 1-65535".into());
+    }
+    Ok(port)
+}
+
+/// Parse a port spec such as `80,443,8000-8100` into a sorted, deduplicated list.
+fn parse_ports(spec: &str) -> Result<Vec<u16>, String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err("ports must not be empty".into());
+    }
+    let mut ports = Vec::new();
+    for item in spec.split(',') {
+        let item = item.trim();
+        if item.is_empty() {
+            return Err("ports contains an empty item".into());
+        }
+        if let Some((start, end)) = item.split_once('-') {
+            let start = parse_port(start)?;
+            let end = parse_port(end)?;
+            if start > end {
+                return Err(format!("port range start must be <= end: {item}"));
+            }
+            let count = usize::from(end) - usize::from(start) + 1;
+            if ports.len() + count > MAX_PORT_SCAN_PORTS {
+                return Err(format!(
+                    "port scan is limited to {MAX_PORT_SCAN_PORTS} ports"
+                ));
+            }
+            ports.extend(start..=end);
+        } else {
+            ports.push(parse_port(item)?);
+            if ports.len() > MAX_PORT_SCAN_PORTS {
+                return Err(format!(
+                    "port scan is limited to {MAX_PORT_SCAN_PORTS} ports"
+                ));
+            }
+        }
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    if ports.is_empty() {
+        return Err("ports must contain at least one port".into());
+    }
+    Ok(ports)
+}
+
+fn validate_origin(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value == "null" {
+        return Ok(());
+    }
+    if value.is_empty()
+        || value.len() > MAX_HEADER_VALUE
+        || value.chars().any(|c| c.is_control())
+        || !(value.starts_with("http://") || value.starts_with("https://"))
+    {
+        return Err("origin must be http://..., https://..., or null".into());
+    }
+    Ok(())
+}
+
 fn validate_dns_host(host: &str) -> Result<(), String> {
     if host.is_empty() || host.len() > MAX_DNS_HOST {
         return Err(format!("host must be 1-{MAX_DNS_HOST} bytes"));
@@ -538,12 +810,220 @@ fn csv_escape(value: &str) -> String {
     }
 }
 
+enum ScopeEntry {
+    Host(String),
+    Address(IpAddr),
+    Network(IpAddr, u8),
+}
+
+impl Scope {
+    fn load(path: &Path) -> Result<Scope, String> {
+        let source = fs::read_to_string(path)
+            .map_err(|error| format!("could not read scope {}: {error}", path.display()))?;
+        let mut scope = Scope {
+            source: path.to_path_buf(),
+            hosts: Vec::new(),
+            networks: Vec::new(),
+            addresses: Vec::new(),
+        };
+        for (index, raw) in source.lines().enumerate() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let entry = parse_scope_entry(line)
+                .map_err(|error| format!("{}: line {}: {error}", path.display(), index + 1))?;
+            match entry {
+                ScopeEntry::Host(host) => scope.hosts.push(host),
+                ScopeEntry::Address(address) => scope.addresses.push(address),
+                ScopeEntry::Network(network, prefix) => scope.networks.push((network, prefix)),
+            }
+        }
+        if scope.hosts.is_empty() && scope.networks.is_empty() && scope.addresses.is_empty() {
+            return Err(format!("scope file has no entries: {}", path.display()));
+        }
+        Ok(scope)
+    }
+
+    fn allows_host(&self, host: &str) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        self.hosts
+            .iter()
+            .any(|pattern| match pattern.strip_prefix("*.") {
+                Some(suffix) => host.ends_with(&format!(".{suffix}")),
+                None => host == *pattern,
+            })
+    }
+
+    fn allows_ip(&self, address: IpAddr) -> bool {
+        self.addresses.contains(&address)
+            || self
+                .networks
+                .iter()
+                .any(|(network, prefix)| ip_in_cidr(address, *network, *prefix))
+    }
+
+    fn allows(&self, host: &str, addresses: &[SocketAddr]) -> bool {
+        self.allows_host(host) || addresses.iter().any(|value| self.allows_ip(value.ip()))
+    }
+}
+
+fn parse_scope_entry(value: &str) -> Result<ScopeEntry, String> {
+    if let Some((address, prefix)) = value.split_once('/') {
+        let address = address
+            .parse::<IpAddr>()
+            .map_err(|_| format!("invalid CIDR address: {value}"))?;
+        let prefix = prefix
+            .parse::<u8>()
+            .map_err(|_| format!("invalid CIDR prefix: {value}"))?;
+        let max = if address.is_ipv4() { 32 } else { 128 };
+        if prefix > max {
+            return Err(format!("CIDR prefix must be 0-{max}: {value}"));
+        }
+        return Ok(ScopeEntry::Network(address, prefix));
+    }
+    if let Ok(address) = value.parse::<IpAddr>() {
+        return Ok(ScopeEntry::Address(address));
+    }
+    let host = value.trim_end_matches('.').to_ascii_lowercase();
+    let host = if let Some(suffix) = host.strip_prefix("*.") {
+        validate_scope_hostname(suffix)?;
+        format!("*.{suffix}")
+    } else if let Some(suffix) = host.strip_prefix('.') {
+        validate_scope_hostname(suffix)?;
+        format!("*.{suffix}")
+    } else {
+        validate_scope_hostname(&host)?;
+        host
+    };
+    Ok(ScopeEntry::Host(host))
+}
+
+fn validate_scope_hostname(host: &str) -> Result<(), String> {
+    if host.is_empty() || host.len() > MAX_DNS_HOST {
+        return Err(format!("scope host must be 1-{MAX_DNS_HOST} bytes"));
+    }
+    if host.contains(['/', '\\', '\r', '\n', ' ', '*', ':']) {
+        return Err(format!("scope host contains invalid characters: {host}"));
+    }
+    for label in host.split('.') {
+        if label.is_empty() || label.len() > MAX_DNS_LABEL {
+            return Err(format!("scope host has an invalid label: {host}"));
+        }
+    }
+    Ok(())
+}
+
+fn ip_in_cidr(address: IpAddr, network: IpAddr, prefix: u8) -> bool {
+    match (address, network) {
+        (IpAddr::V4(address), IpAddr::V4(network)) => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            (u32::from(address) & mask) == (u32::from(network) & mask)
+        }
+        (IpAddr::V6(address), IpAddr::V6(network)) => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            (u128::from(address) & mask) == (u128::from(network) & mask)
+        }
+        _ => false,
+    }
+}
+
+fn scope_error(host: &str, scope: &Scope) -> String {
+    format!(
+        "target {host} is outside the authorized scope in {}",
+        scope.source.display()
+    )
+}
+
+fn scope_precheck_host(host: &str, opts: &Options) -> Result<(), String> {
+    let Some(scope) = &opts.scope else {
+        return Ok(());
+    };
+    if scope.allows_host(host) {
+        return Ok(());
+    }
+    if let Ok(address) = host.parse::<IpAddr>() {
+        return if scope.allows_ip(address) {
+            Ok(())
+        } else {
+            Err(scope_error(host, scope))
+        };
+    }
+    if scope.networks.is_empty() && scope.addresses.is_empty() {
+        return Err(scope_error(host, scope));
+    }
+    Ok(())
+}
+
+fn scope_allows(host: &str, addresses: &[SocketAddr], opts: &Options) -> Result<(), String> {
+    let Some(scope) = &opts.scope else {
+        return Ok(());
+    };
+    if scope.allows(host, addresses) {
+        Ok(())
+    } else {
+        Err(scope_error(host, scope))
+    }
+}
+
+fn ensure_scope_host(host: &str, opts: &Options) -> Result<(), String> {
+    let Some(scope) = &opts.scope else {
+        return Ok(());
+    };
+    if scope.allows_host(host) {
+        return Ok(());
+    }
+    if let Ok(address) = host.parse::<IpAddr>() {
+        return if scope.allows_ip(address) {
+            Ok(())
+        } else {
+            Err(scope_error(host, scope))
+        };
+    }
+    if scope.networks.is_empty() && scope.addresses.is_empty() {
+        return Err(scope_error(host, scope));
+    }
+    let resolved = resolve(host, 0, Family::Any)
+        .map_err(|error| format!("scope check could not resolve {host}: {error}"))?;
+    if resolved.iter().any(|address| scope.allows_ip(address.ip())) {
+        Ok(())
+    } else {
+        Err(scope_error(host, scope))
+    }
+}
+
+fn is_loopback_target(host: &str) -> bool {
+    host.parse::<IpAddr>()
+        .map(|address| address.is_loopback())
+        .unwrap_or_else(|_| host.eq_ignore_ascii_case("localhost"))
+}
+
+/// Active recon commands are allowed on loopback by default, but require an
+/// explicit authorization scope file for every non-loopback target.
+fn require_active_scope(host: &str, opts: &Options, command: &str) -> Result<(), String> {
+    if opts.scope.is_none() && !is_loopback_target(host) {
+        return Err(format!(
+            "{command} requires --scope <file> for non-loopback targets"
+        ));
+    }
+    ensure_scope_host(host, opts)
+}
+
 fn fresh_options() -> Options {
     Options {
         timeout: Duration::from_secs(DEFAULT_TIMEOUT),
         retries: 0,
         output: Output::Text,
         verbose: false,
+        quiet: false,
         path: "/".into(),
         method: "HEAD".into(),
         expect_status: None,
@@ -560,7 +1040,20 @@ fn fresh_options() -> Options {
         dns_server: None,
         rate: DEFAULT_LOAD_RATE as u32,
         count: DEFAULT_LOAD_COUNT as u32,
+        steps: 4,
+        clients: 4,
+        hold_seconds: 5,
         rotate_user_agent: false,
+        random_user_agent: false,
+        audit_headers: false,
+        concurrency: MAX_CONCURRENCY as u32,
+        ports: None,
+        wordlist: None,
+        origin: None,
+        skip_certificate: false,
+        show_all_headers: false,
+        scope: None,
+        scope_path: None,
     }
 }
 
@@ -647,14 +1140,80 @@ fn apply_config_pair(opts: &mut Options, key: &str, value: &str) -> Result<(), S
         "count" => {
             opts.count = bare_number("count", value, 1, MAX_LOAD_COUNT)? as u32;
         }
+        "steps" => {
+            opts.steps = bare_number("steps", value, 1, MAX_CAPACITY_STEPS)? as u32;
+        }
+        "clients" => {
+            opts.clients = bare_number("clients", value, 1, MAX_SLOW_CLIENTS)? as u32;
+        }
+        "hold" => {
+            opts.hold_seconds = bare_number("hold", value, 1, MAX_SLOW_HOLD_SECONDS)?;
+        }
         "rotate-user-agent" => match value.trim() {
             "true" => opts.rotate_user_agent = true,
             "false" => opts.rotate_user_agent = false,
             _ => return Err("rotate-user-agent must be true or false".into()),
         },
+        "random-user-agent" => match value.trim() {
+            "true" => opts.random_user_agent = true,
+            "false" => opts.random_user_agent = false,
+            _ => return Err("random-user-agent must be true or false".into()),
+        },
+        "audit-headers" => match value.trim() {
+            "true" => opts.audit_headers = true,
+            "false" => opts.audit_headers = false,
+            _ => return Err("audit-headers must be true or false".into()),
+        },
+        "concurrency" => {
+            opts.concurrency = bare_number("concurrency", value, 1, MAX_CONCURRENCY as u64)? as u32;
+        }
+        "ports" => {
+            parse_ports(value)?;
+            opts.ports = Some(value.trim().to_string());
+        }
+        "wordlist" => {
+            if value.trim().is_empty() {
+                return Err("wordlist must be a file path".into());
+            }
+            opts.wordlist = Some(PathBuf::from(value.trim()));
+        }
+        "origin" => {
+            validate_origin(value)?;
+            opts.origin = Some(value.trim().to_string());
+        }
+        "scope" => {
+            if value.trim().is_empty() {
+                return Err("scope must be a file path".into());
+            }
+            opts.scope_path = Some(PathBuf::from(value.trim()));
+        }
         "dns-type" => {
             opts.dns_type = Some(DnsType::parse(value)?);
         }
+        "dns-server" => {
+            opts.dns_server = Some(
+                value
+                    .parse()
+                    .map_err(|_| "dns-server must be an IPv4 or IPv6 address")?,
+            );
+        }
+        "payload" => {
+            let bytes = decode_hex(value)?;
+            if bytes.is_empty() || bytes.len() > MAX_UDP_PAYLOAD {
+                return Err(format!("payload must be 1-{MAX_UDP_PAYLOAD} bytes"));
+            }
+            opts.payload = Some(bytes);
+        }
+        "verbose" => match value.trim() {
+            "true" => opts.verbose = true,
+            "false" => opts.verbose = false,
+            _ => return Err("verbose must be true or false".into()),
+        },
+        "quiet" => match value.trim() {
+            "true" => opts.quiet = true,
+            "false" => opts.quiet = false,
+            _ => return Err("quiet must be true or false".into()),
+        },
         other => {
             return Err(format!("unknown config key: {other}"));
         }
@@ -726,7 +1285,13 @@ fn config_directory_args(args: &[String]) -> Result<(Option<PathBuf>, bool), Str
         "--payload",
         "--dns-type",
         "--dns-server",
+        "--scope",
+        "--audit-log",
         "--config",
+        "--concurrency",
+        "--ports",
+        "--wordlist",
+        "--origin",
     ];
     let mut path = None;
     let mut disabled = false;
@@ -831,6 +1396,37 @@ fn apply_env(opts: &mut Options) -> Result<(), String> {
         opts.body_bytes = bare_number("DDOS_BODY_BYTES", &value, 0, MAX_BODY_BYTES as u64)
             .map_err(|e| format!("DDOS_BODY_BYTES: {e}"))?;
     }
+    if let Some(value) = env_value("DDOS_DNS_TYPE") {
+        opts.dns_type = Some(DnsType::parse(&value).map_err(|e| format!("DDOS_DNS_TYPE: {e}"))?);
+    }
+    if let Some(value) = env_value("DDOS_DNS_SERVER") {
+        opts.dns_server = Some(
+            value
+                .parse()
+                .map_err(|_| "DDOS_DNS_SERVER must be an IPv4 or IPv6 address".to_string())?,
+        );
+    }
+    if let Some(value) = env_value("DDOS_PAYLOAD") {
+        let bytes = decode_hex(&value).map_err(|e| format!("DDOS_PAYLOAD: {e}"))?;
+        if bytes.is_empty() || bytes.len() > MAX_UDP_PAYLOAD {
+            return Err(format!("DDOS_PAYLOAD must be 1-{MAX_UDP_PAYLOAD} bytes"));
+        }
+        opts.payload = Some(bytes);
+    }
+    if let Some(value) = env_value("DDOS_VERBOSE") {
+        match value.trim() {
+            "true" => opts.verbose = true,
+            "false" => opts.verbose = false,
+            _ => return Err("DDOS_VERBOSE must be true or false".into()),
+        }
+    }
+    if let Some(value) = env_value("DDOS_QUIET") {
+        match value.trim() {
+            "true" => opts.quiet = true,
+            "false" => opts.quiet = false,
+            _ => return Err("DDOS_QUIET must be true or false".into()),
+        }
+    }
     if let Some(value) = env_value("DDOS_RATE") {
         opts.rate = bare_number("DDOS_RATE", &value, 1, MAX_LOAD_RATE)
             .map_err(|e| format!("DDOS_RATE: {e}"))? as u32;
@@ -839,12 +1435,56 @@ fn apply_env(opts: &mut Options) -> Result<(), String> {
         opts.count = bare_number("DDOS_COUNT", &value, 1, MAX_LOAD_COUNT)
             .map_err(|e| format!("DDOS_COUNT: {e}"))? as u32;
     }
+    if let Some(value) = env_value("DDOS_STEPS") {
+        opts.steps = bare_number("DDOS_STEPS", &value, 1, MAX_CAPACITY_STEPS)
+            .map_err(|e| format!("DDOS_STEPS: {e}"))? as u32;
+    }
+    if let Some(value) = env_value("DDOS_CLIENTS") {
+        opts.clients = bare_number("DDOS_CLIENTS", &value, 1, MAX_SLOW_CLIENTS)
+            .map_err(|e| format!("DDOS_CLIENTS: {e}"))? as u32;
+    }
+    if let Some(value) = env_value("DDOS_HOLD") {
+        opts.hold_seconds = bare_number("DDOS_HOLD", &value, 1, MAX_SLOW_HOLD_SECONDS)
+            .map_err(|e| format!("DDOS_HOLD: {e}"))?;
+    }
     if let Some(value) = env_value("DDOS_ROTATE_USER_AGENT") {
         match value.trim() {
             "true" => opts.rotate_user_agent = true,
             "false" => opts.rotate_user_agent = false,
             _ => return Err("DDOS_ROTATE_USER_AGENT must be true or false".into()),
         }
+    }
+    if let Some(value) = env_value("DDOS_RANDOM_USER_AGENT") {
+        match value.trim() {
+            "true" => opts.random_user_agent = true,
+            "false" => opts.random_user_agent = false,
+            _ => return Err("DDOS_RANDOM_USER_AGENT must be true or false".into()),
+        }
+    }
+    if let Some(value) = env_value("DDOS_AUDIT_HEADERS") {
+        match value.trim() {
+            "true" => opts.audit_headers = true,
+            "false" => opts.audit_headers = false,
+            _ => return Err("DDOS_AUDIT_HEADERS must be true or false".into()),
+        }
+    }
+    if let Some(value) = env_value("DDOS_CONCURRENCY") {
+        opts.concurrency = bare_number("DDOS_CONCURRENCY", &value, 1, MAX_CONCURRENCY as u64)
+            .map_err(|e| format!("DDOS_CONCURRENCY: {e}"))? as u32;
+    }
+    if let Some(value) = env_value("DDOS_PORTS") {
+        parse_ports(&value).map_err(|e| format!("DDOS_PORTS: {e}"))?;
+        opts.ports = Some(value);
+    }
+    if let Some(value) = env_value("DDOS_WORDLIST") {
+        opts.wordlist = Some(PathBuf::from(value));
+    }
+    if let Some(value) = env_value("DDOS_ORIGIN") {
+        validate_origin(&value).map_err(|e| format!("DDOS_ORIGIN: {e}"))?;
+        opts.origin = Some(value);
+    }
+    if let Some(value) = env_value("DDOS_SCOPE") {
+        opts.scope_path = Some(PathBuf::from(value));
     }
     if let Some(value) = env_value("DDOS_SHOW_HEADER") {
         for name in value.split(',').map(str::trim).filter(|v| !v.is_empty()) {
@@ -945,6 +1585,13 @@ fn apply_args(opts: &mut Options, args: &[String]) -> Result<Vec<String>, String
                 opts.verbose = true;
                 i += 1;
             }
+            "--quiet" => {
+                opts.quiet = true;
+                i += 1;
+            }
+            "--no-color" => {
+                i += 1;
+            }
             "--header" => {
                 let header = args.get(i + 1).ok_or("--header requires \"Name: value\"")?;
                 let (name, value) = parse_header(header)?;
@@ -991,9 +1638,69 @@ fn apply_args(opts: &mut Options, args: &[String]) -> Result<Vec<String>, String
                 opts.count = number(args.get(i + 1), "--count", 1, MAX_LOAD_COUNT)? as u32;
                 i += 2;
             }
+            "--steps" => {
+                opts.steps = number(args.get(i + 1), "--steps", 1, MAX_CAPACITY_STEPS)? as u32;
+                i += 2;
+            }
+            "--clients" => {
+                opts.clients = number(args.get(i + 1), "--clients", 1, MAX_SLOW_CLIENTS)? as u32;
+                i += 2;
+            }
+            "--hold" => {
+                opts.hold_seconds = number(args.get(i + 1), "--hold", 1, MAX_SLOW_HOLD_SECONDS)?;
+                i += 2;
+            }
             "--rotate-user-agent" => {
                 opts.rotate_user_agent = true;
                 i += 1;
+            }
+            "--random-user-agent" => {
+                opts.random_user_agent = true;
+                i += 1;
+            }
+            "--audit-headers" => {
+                opts.audit_headers = true;
+                i += 1;
+            }
+            "--scope" => {
+                let scope = args.get(i + 1).ok_or("--scope requires a file path")?;
+                if scope.trim().is_empty() {
+                    return Err("--scope requires a file path".into());
+                }
+                opts.scope_path = Some(PathBuf::from(scope));
+                i += 2;
+            }
+            "--concurrency" => {
+                opts.concurrency =
+                    number(args.get(i + 1), "--concurrency", 1, MAX_CONCURRENCY as u64)? as u32;
+                i += 2;
+            }
+            "--ports" => {
+                let ports = args.get(i + 1).ok_or("--ports requires a spec")?;
+                parse_ports(ports)?;
+                opts.ports = Some(ports.trim().to_string());
+                i += 2;
+            }
+            "--wordlist" => {
+                let wordlist = args.get(i + 1).ok_or("--wordlist requires a file path")?;
+                if wordlist.trim().is_empty() {
+                    return Err("--wordlist requires a file path".into());
+                }
+                opts.wordlist = Some(PathBuf::from(wordlist));
+                i += 2;
+            }
+            "--origin" => {
+                let origin = args.get(i + 1).ok_or("--origin requires an origin URL")?;
+                validate_origin(origin)?;
+                opts.origin = Some(origin.trim().to_string());
+                i += 2;
+            }
+            "--audit-log" => {
+                let path = args.get(i + 1).ok_or("--audit-log requires a file path")?;
+                if path.trim().is_empty() {
+                    return Err("--audit-log requires a file path".into());
+                }
+                i += 2;
             }
             "--family" => {
                 let family = args
@@ -1044,6 +1751,9 @@ fn options(args: &[String]) -> Result<(Options, Vec<String>), String> {
     let mut opts = load_config(args)?;
     apply_env(&mut opts)?;
     let positional = apply_args(&mut opts, args)?;
+    if let Some(path) = &opts.scope_path {
+        opts.scope = Some(Scope::load(path)?);
+    }
     Ok((opts, positional))
 }
 
@@ -1490,6 +2200,14 @@ fn certificate_probe(host: &str, port: u16, opts: &Options) -> Result<Certificat
     .map_err(|error| error.to_string())?;
     let mut response = [0_u8; 1];
     let _ = tls.read(&mut response);
+    let protocol = tls
+        .conn
+        .protocol_version()
+        .map(|value| format!("{value:?}"));
+    let cipher_suite = tls
+        .conn
+        .negotiated_cipher_suite()
+        .map(|value| format!("{:?}", value.suite()));
     let certificate = tls
         .conn
         .peer_certificates()
@@ -1531,7 +2249,42 @@ fn certificate_probe(host: &str, port: u16, opts: &Options) -> Result<Certificat
         not_before: parsed.validity().not_before.to_string(),
         not_after: parsed.validity().not_after.to_string(),
         expired: now_unix > not_after_unix as u64,
+        protocol,
+        cipher_suite,
     })
+}
+
+const SECURITY_HEADERS: [(&str, u8); 8] = [
+    ("strict-transport-security", 15),
+    ("content-security-policy", 25),
+    ("x-content-type-options", 10),
+    ("x-frame-options", 10),
+    ("referrer-policy", 10),
+    ("permissions-policy", 10),
+    ("cross-origin-opener-policy", 10),
+    ("cross-origin-embedder-policy", 10),
+];
+
+fn security_grade(checks: &[HeaderCheck]) -> (u8, String) {
+    let score = checks
+        .iter()
+        .filter(|check| check.present)
+        .map(|check| {
+            SECURITY_HEADERS
+                .iter()
+                .find(|(name, _)| *name == check.name)
+                .map(|(_, weight)| *weight)
+                .unwrap_or(0)
+        })
+        .fold(0_u8, u8::saturating_add);
+    let grade = match score {
+        90..=100 => "A",
+        75..=89 => "B",
+        60..=74 => "C",
+        40..=59 => "D",
+        _ => "F",
+    };
+    (score, grade.to_string())
 }
 
 fn http_probe(url: &str, host: &str, port: u16, opts: &Options) -> HttpResult {
@@ -1543,13 +2296,19 @@ fn http_probe(url: &str, host: &str, port: u16, opts: &Options) -> HttpResult {
         },
         None => String::new(),
     };
+    let redirects = if opts.scope.is_some() {
+        0
+    } else {
+        opts.redirects
+    };
     let mut builder = ureq::AgentBuilder::new()
         .timeout_connect(opts.timeout)
         .timeout_read(opts.timeout)
         .timeout_write(opts.timeout)
-        .redirects(opts.redirects);
+        .redirects(redirects);
     builder = match opts.user_agent.as_deref() {
         Some(agent) => builder.user_agent(agent),
+        None if opts.random_user_agent => builder.user_agent(pick_random_user_agent()),
         None => builder.user_agent(USER_AGENT),
     };
     if let Some(proxy) = &opts.proxy {
@@ -1564,69 +2323,107 @@ fn http_probe(url: &str, host: &str, port: u16, opts: &Options) -> HttpResult {
     for (name, value) in &opts.headers {
         request = request.set(name, value);
     }
-    match request.call() {
-        Ok(response) => {
-            let status = response.status();
-            let status_text = response.status_text().to_string();
-            let headers = opts
-                .show_headers
+    // ureq reports 4xx/5xx as Error::Status; recover the response so that
+    // --expect-status, path discovery, and CORS/cookie audits can inspect it.
+    let response = match request.call() {
+        Ok(response) => response,
+        Err(ureq::Error::Status(_, response)) => response,
+        Err(error) => return probe_error(url, &started, error.to_string()),
+    };
+    let status = response.status();
+    let status_text = response.status_text().to_string();
+    let headers = if opts.show_all_headers {
+        opts.show_headers
+            .iter()
+            .flat_map(|name| {
+                response
+                    .all(name)
+                    .into_iter()
+                    .map(|value| (name.clone(), value.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    } else {
+        opts.show_headers
+            .iter()
+            .filter_map(|name| {
+                response
+                    .header(name)
+                    .map(|value| (name.clone(), value.into()))
+            })
+            .collect()
+    };
+    let security_headers = if opts.audit_headers {
+        Some(
+            SECURITY_HEADERS
                 .iter()
-                .filter_map(|name| {
-                    response
-                        .header(name)
-                        .map(|value| (name.clone(), value.into()))
-                })
-                .collect();
-            let mut body_size = None;
-            let mut body_read_error = None;
-            let mut body_preview = None;
-            if opts.method == "GET" && opts.body_bytes > 0 {
-                let mut reader = response
-                    .into_reader()
-                    .take(opts.body_bytes.min(MAX_BODY_BYTES as u64));
-                let mut buffer = Vec::new();
-                match reader.read_to_end(&mut buffer) {
-                    Ok(_) => {
-                        body_size = Some(buffer.len() as u64);
-                        body_preview = Some(preview_bytes(&buffer, UDP_PREVIEW_BYTES));
+                .map(|(name, _)| {
+                    let value = response.header(name).map(|value| value.to_string());
+                    HeaderCheck {
+                        name: (*name).into(),
+                        present: value.is_some(),
+                        value,
                     }
-                    Err(error) => body_read_error = Some(error.to_string()),
+                })
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
+    let (security_score, security_grade) =
+        security_headers.as_deref().map_or((None, None), |checks| {
+            let (score, grade) = security_grade(checks);
+            (Some(score), Some(grade))
+        });
+    let mut body_size = None;
+    let mut body_read_error = None;
+    let mut body_preview = None;
+    if opts.method == "GET" && opts.body_bytes > 0 {
+        let mut reader = response
+            .into_reader()
+            .take(opts.body_bytes.min(MAX_BODY_BYTES as u64));
+        let mut buffer = Vec::new();
+        match reader.read_to_end(&mut buffer) {
+            Ok(_) => {
+                body_size = Some(buffer.len() as u64);
+                body_preview = Some(preview_bytes(&buffer, UDP_PREVIEW_BYTES));
+            }
+            Err(error) => body_read_error = Some(error.to_string()),
+        }
+    }
+    HttpResult {
+        url: url.into(),
+        status: Some(status),
+        status_text: Some(status_text),
+        elapsed_ms: started.elapsed().as_millis(),
+        error: None,
+        headers,
+        status_ok: opts
+            .expect_status
+            .map_or(status < 500, |expected| status == expected),
+        body_size,
+        body_read_error,
+        body_preview,
+        certificate: if url.starts_with("https://") && !opts.skip_certificate {
+            match certificate_probe(host, port, opts) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    return HttpResult {
+                        certificate_error: Some(error),
+                        ..probe_error(url, &started, "TLS certificate probe failed".into())
+                    }
                 }
             }
-            HttpResult {
-                url: url.into(),
-                status: Some(status),
-                status_text: Some(status_text),
-                elapsed_ms: started.elapsed().as_millis(),
-                error: None,
-                headers,
-                status_ok: opts
-                    .expect_status
-                    .map_or(status < 500, |expected| status == expected),
-                body_size,
-                body_read_error,
-                body_preview,
-                certificate: if url.starts_with("https://") {
-                    match certificate_probe(host, port, opts) {
-                        Ok(value) => Some(value),
-                        Err(error) => {
-                            return HttpResult {
-                                certificate_error: Some(error),
-                                ..probe_error(url, &started, "TLS certificate probe failed".into())
-                            }
-                        }
-                    }
-                } else {
-                    None
-                },
-                certificate_error: None,
-            }
-        }
-        Err(error) => probe_error(url, &started, error.to_string()),
+        } else {
+            None
+        },
+        certificate_error: None,
+        security_headers,
+        security_score,
+        security_grade,
     }
 }
 
-/// Build a failed HttpResult with consistent empty fields.
 fn probe_error(url: &str, started: &Instant, error: String) -> HttpResult {
     HttpResult {
         url: url.into(),
@@ -1641,6 +2438,9 @@ fn probe_error(url: &str, started: &Instant, error: String) -> HttpResult {
         body_preview: None,
         certificate: None,
         certificate_error: None,
+        security_headers: None,
+        security_score: None,
+        security_grade: None,
     }
 }
 
@@ -1657,6 +2457,1123 @@ fn preview_bytes(payload: &[u8], limit: usize) -> String {
         .collect()
 }
 
+// --- Bounded reconnaissance and web security checks ------------------------
+//
+// These commands are diagnostic and bounded. Port scans and path discovery
+// accept loopback targets without extra authorization, but every non-loopback
+// target must be listed in an explicit --scope file.
+
+#[derive(Serialize, Clone)]
+struct PortResult {
+    address: String,
+    port: u16,
+    open: bool,
+    elapsed_ms: u128,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PortScanReport {
+    schema_version: u8,
+    version: String,
+    host: String,
+    addresses: Vec<String>,
+    ports: Vec<u16>,
+    results: Vec<PortResult>,
+    open: Vec<String>,
+    open_count: usize,
+    scanned_count: usize,
+    total_elapsed_ms: u128,
+    ok: bool,
+    error: Option<String>,
+}
+
+fn port_scan(host: &str, opts: &Options) -> Result<PortScanReport, String> {
+    let started = Instant::now();
+    require_active_scope(host, opts, "port-scan")?;
+    let ports = parse_ports(opts.ports.as_deref().unwrap_or(DEFAULT_SCAN_PORTS))?;
+    let resolved =
+        resolve(host, 0, opts.family).map_err(|error| format!("DNS resolution failed: {error}"))?;
+    let mut addresses: Vec<SocketAddr> = Vec::new();
+    for address in resolved {
+        if addresses.iter().any(|value| value.ip() == address.ip()) {
+            continue;
+        }
+        addresses.push(address);
+        if addresses.len() >= MAX_PORT_SCAN_ADDRESSES {
+            break;
+        }
+    }
+    if addresses.is_empty() {
+        return Err(format!("no address found for {host}"));
+    }
+    if ports.len().saturating_mul(addresses.len()) > MAX_PORT_SCAN_PORTS {
+        addresses.truncate(1);
+    }
+    let timeout = opts
+        .timeout
+        .min(Duration::from_secs(MAX_PORT_SCAN_TIMEOUT_SECONDS));
+    let worker_count = (opts.concurrency as usize)
+        .clamp(1, MAX_CONCURRENCY)
+        .min(ports.len().max(1));
+    let total = ports.len() * addresses.len();
+    let ports = Arc::new(ports);
+    let addresses = Arc::new(addresses);
+    let next = Arc::new(AtomicUsize::new(0));
+    let (sender, receiver) = mpsc::channel();
+    for _ in 0..worker_count {
+        let ports = Arc::clone(&ports);
+        let addresses = Arc::clone(&addresses);
+        let next = Arc::clone(&next);
+        let sender = sender.clone();
+        thread::spawn(move || loop {
+            let index = next.fetch_add(1, Ordering::Relaxed);
+            if index >= ports.len() * addresses.len() {
+                break;
+            }
+            let port = ports[index % ports.len()];
+            let address = addresses[index / ports.len()];
+            let target = SocketAddr::new(address.ip(), port);
+            let scan_started = Instant::now();
+            let (open, error) = match TcpStream::connect_timeout(&target, timeout) {
+                Ok(stream) => {
+                    drop(stream);
+                    (true, None)
+                }
+                Err(error) => (false, Some(error.to_string())),
+            };
+            let result = PortResult {
+                address: address.ip().to_string(),
+                port,
+                open,
+                elapsed_ms: scan_started.elapsed().as_millis(),
+                error,
+            };
+            if sender.send(result).is_err() {
+                break;
+            }
+        });
+    }
+    drop(sender);
+    let mut results: Vec<PortResult> = receiver.into_iter().collect();
+    results.sort_by(|left, right| {
+        left.address
+            .cmp(&right.address)
+            .then(left.port.cmp(&right.port))
+    });
+    let open = results
+        .iter()
+        .filter(|result| result.open)
+        .map(|result| format!("{}:{}", result.address, result.port))
+        .collect::<Vec<_>>();
+    Ok(PortScanReport {
+        schema_version: 1,
+        version: VERSION.into(),
+        host: host.into(),
+        addresses: addresses
+            .iter()
+            .map(|value| value.ip().to_string())
+            .collect(),
+        ports: ports.to_vec(),
+        results: results.clone(),
+        open_count: open.len(),
+        open,
+        scanned_count: total,
+        total_elapsed_ms: started.elapsed().as_millis(),
+        ok: results.len() == total,
+        error: if results.len() == total {
+            None
+        } else {
+            Some("some scan workers did not return a result".into())
+        },
+    })
+}
+
+fn print_port_scan_report(report: &PortScanReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
+    match opts.output {
+        Output::Json => println!("{}", serde_json::to_string_pretty(report).unwrap()),
+        Output::Jsonl => {
+            if let Ok(line) = serde_json::to_string(report) {
+                println!("{line}");
+            }
+        }
+        Output::Csv => {
+            println!("host,address,port,open,elapsed_ms,error");
+            for result in &report.results {
+                println!(
+                    "{},{},{},{},{},{}",
+                    csv_escape(&report.host),
+                    csv_escape(&result.address),
+                    result.port,
+                    result.open,
+                    result.elapsed_ms,
+                    csv_escape(result.error.as_deref().unwrap_or_default())
+                );
+            }
+        }
+        Output::Text => {
+            println!(
+                "PORT-SCAN {} ({} address(es), {} port(s), {} open, {} ms)",
+                report.host,
+                report.addresses.len(),
+                report.ports.len(),
+                report.open_count,
+                report.total_elapsed_ms
+            );
+            for result in &report.results {
+                if result.open {
+                    println!(
+                        "  {}:{}/tcp open ({} ms)",
+                        result.address, result.port, result.elapsed_ms
+                    );
+                } else if opts.verbose {
+                    println!(
+                        "  {}:{}/tcp closed ({} ms){}",
+                        result.address,
+                        result.port,
+                        result.elapsed_ms,
+                        result
+                            .error
+                            .as_deref()
+                            .map(|error| format!(": {error}"))
+                            .unwrap_or_default()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
+struct PathResult {
+    path: String,
+    url: String,
+    status: Option<u16>,
+    status_text: Option<String>,
+    content_length: Option<u64>,
+    location: Option<String>,
+    elapsed_ms: u128,
+    interesting: bool,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PathDiscoveryReport {
+    schema_version: u8,
+    version: String,
+    target: String,
+    base_url: String,
+    host: String,
+    port: u16,
+    results: Vec<PathResult>,
+    scanned_count: usize,
+    found_count: usize,
+    total_elapsed_ms: u128,
+    ok: bool,
+    error: Option<String>,
+}
+
+fn validate_discovery_path(path: &str) -> Result<(), String> {
+    if !path.starts_with('/')
+        || path.len() > 2048
+        || path
+            .chars()
+            .any(|character| character.is_control() || character == ' ')
+    {
+        return Err(
+            "path must start with '/', contain no spaces/control characters, and be <= 2048 bytes"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn read_discovery_paths(opts: &Options) -> Result<Vec<String>, String> {
+    let paths = match &opts.wordlist {
+        Some(path) => {
+            let source = fs::read_to_string(path)
+                .map_err(|error| format!("could not read wordlist {}: {error}", path.display()))?;
+            let mut paths = Vec::new();
+            for (index, raw) in source.lines().enumerate() {
+                let line = raw.split('#').next().unwrap_or("").trim();
+                if line.is_empty() {
+                    continue;
+                }
+                validate_discovery_path(line)
+                    .map_err(|error| format!("{}: line {}: {error}", path.display(), index + 1))?;
+                paths.push(line.to_string());
+                if paths.len() > MAX_PATH_DISCOVERY_PATHS {
+                    return Err(format!(
+                        "path discovery is limited to {MAX_PATH_DISCOVERY_PATHS} paths"
+                    ));
+                }
+            }
+            paths
+        }
+        None => DEFAULT_DISCOVERY_PATHS
+            .iter()
+            .map(|path| (*path).to_string())
+            .collect(),
+    };
+    if paths.is_empty() {
+        return Err("path discovery requires at least one path".into());
+    }
+    Ok(paths)
+}
+
+fn interesting_status(status: u16) -> bool {
+    (200..400).contains(&status) || matches!(status, 401 | 403 | 405 | 500)
+}
+
+fn path_discovery(value: &str, opts: &Options) -> Result<PathDiscoveryReport, String> {
+    let started = Instant::now();
+    let (host, port, url) = target(value)?;
+    let base_url = url.unwrap_or_else(|| format!("http://{host}:{port}{}", opts.path));
+    require_active_scope(&host, opts, "path-discovery")?;
+    let paths = read_discovery_paths(opts)?;
+    let base = base_url.trim_end_matches('/');
+    let mut results = Vec::new();
+    let mut found_count = 0;
+    for path in &paths {
+        let url = format!("{base}{path}");
+        let mut probe = opts.clone();
+        probe.method = "GET".into();
+        probe.body_bytes = 0;
+        probe.audit_headers = false;
+        probe.expect_status = None;
+        probe.skip_certificate = true;
+        probe.show_all_headers = false;
+        probe.show_headers = vec![
+            "content-length".into(),
+            "content-type".into(),
+            "location".into(),
+        ];
+        let result = http_probe(&url, &host, port, &probe);
+        let content_length = result
+            .headers
+            .iter()
+            .find(|(name, _)| name == "content-length")
+            .and_then(|(_, value)| value.parse::<u64>().ok());
+        let location = result
+            .headers
+            .iter()
+            .find(|(name, _)| name == "location")
+            .map(|(_, value)| value.clone());
+        let interesting = result.status.map(interesting_status).unwrap_or(false);
+        if interesting {
+            found_count += 1;
+        }
+        results.push(PathResult {
+            path: path.clone(),
+            url,
+            status: result.status,
+            status_text: result.status_text,
+            content_length,
+            location,
+            elapsed_ms: result.elapsed_ms,
+            interesting,
+            error: result.error,
+        });
+        thread::sleep(Duration::from_millis(PATH_DISCOVERY_DELAY_MS));
+    }
+    Ok(PathDiscoveryReport {
+        schema_version: 1,
+        version: VERSION.into(),
+        target: value.into(),
+        base_url,
+        host,
+        port,
+        scanned_count: results.len(),
+        found_count,
+        ok: results.iter().all(|result| result.error.is_none()),
+        results,
+        total_elapsed_ms: started.elapsed().as_millis(),
+        error: None,
+    })
+}
+
+fn print_path_discovery_report(report: &PathDiscoveryReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
+    match opts.output {
+        Output::Json => println!("{}", serde_json::to_string_pretty(report).unwrap()),
+        Output::Jsonl => {
+            if let Ok(line) = serde_json::to_string(report) {
+                println!("{line}");
+            }
+        }
+        Output::Csv => {
+            println!("target,path,status,content_length,elapsed_ms,interesting,error");
+            for result in &report.results {
+                println!(
+                    "{},{},{},{},{},{},{}",
+                    csv_escape(&report.target),
+                    csv_escape(&result.path),
+                    result
+                        .status
+                        .map(|status| status.to_string())
+                        .unwrap_or_default(),
+                    result
+                        .content_length
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    result.elapsed_ms,
+                    result.interesting,
+                    csv_escape(result.error.as_deref().unwrap_or_default())
+                );
+            }
+        }
+        Output::Text => {
+            println!(
+                "PATH-DISCOVERY {} ({} scanned, {} interesting, {} ms)",
+                report.base_url, report.scanned_count, report.found_count, report.total_elapsed_ms
+            );
+            let mut printed = 0;
+            for result in &report.results {
+                if result.interesting || opts.verbose {
+                    printed += 1;
+                    let location = result
+                        .location
+                        .as_deref()
+                        .map(|value| format!(" -> {value}"))
+                        .unwrap_or_default();
+                    println!(
+                        "  {} {} ({} bytes, {} ms){}",
+                        result
+                            .status
+                            .map(|status| status.to_string())
+                            .unwrap_or_else(|| "ERR".into()),
+                        result.path,
+                        result
+                            .content_length
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "?".into()),
+                        result.elapsed_ms,
+                        location
+                    );
+                }
+            }
+            if printed == 0 {
+                println!("  no interesting paths");
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
+struct CorsFinding {
+    code: String,
+    severity: String,
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct CorsReport {
+    schema_version: u8,
+    version: String,
+    target: String,
+    url: String,
+    origin: String,
+    status: Option<u16>,
+    allow_origin: Option<String>,
+    allow_credentials: Option<String>,
+    allow_methods: Option<String>,
+    allow_headers: Option<String>,
+    vary: Option<String>,
+    findings: Vec<CorsFinding>,
+    ok: bool,
+    total_elapsed_ms: u128,
+    error: Option<String>,
+}
+
+fn analyze_cors(
+    allow_origin: Option<&str>,
+    allow_credentials: Option<&str>,
+    vary: Option<&str>,
+    origin: &str,
+) -> Vec<CorsFinding> {
+    let mut findings = Vec::new();
+    let credentials = allow_credentials
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    match allow_origin {
+        None => {}
+        Some("*") => {
+            if credentials {
+                findings.push(CorsFinding {
+                    code: "wildcard_with_credentials".into(),
+                    severity: "high".into(),
+                    detail: "Access-Control-Allow-Origin is '*' with credentials enabled".into(),
+                });
+            } else {
+                findings.push(CorsFinding {
+                    code: "wildcard_origin".into(),
+                    severity: "medium".into(),
+                    detail: "Access-Control-Allow-Origin is '*' for any origin".into(),
+                });
+            }
+        }
+        Some("null") => findings.push(CorsFinding {
+            code: "null_origin".into(),
+            severity: "high".into(),
+            detail: "Access-Control-Allow-Origin accepts the opaque 'null' origin".into(),
+        }),
+        Some(value) if value.eq_ignore_ascii_case(origin) => {
+            if credentials {
+                findings.push(CorsFinding {
+                    code: "reflected_with_credentials".into(),
+                    severity: "critical".into(),
+                    detail: "arbitrary Origin is reflected while credentials are enabled".into(),
+                });
+            } else {
+                findings.push(CorsFinding {
+                    code: "reflected_origin".into(),
+                    severity: "medium".into(),
+                    detail: "arbitrary Origin is reflected in Access-Control-Allow-Origin".into(),
+                });
+            }
+            let vary_ok = vary
+                .map(|value| {
+                    value
+                        .split(',')
+                        .any(|item| item.trim().eq_ignore_ascii_case("origin"))
+                })
+                .unwrap_or(false);
+            if !vary_ok {
+                findings.push(CorsFinding {
+                    code: "missing_vary_origin".into(),
+                    severity: "low".into(),
+                    detail: "reflected CORS response does not include Vary: Origin".into(),
+                });
+            }
+        }
+        Some(_) => {}
+    }
+    findings
+}
+
+fn cors_check(value: &str, opts: &Options) -> Result<CorsReport, String> {
+    let started = Instant::now();
+    let (host, port, url) = target(value)?;
+    let url = url.unwrap_or_else(|| format!("http://{host}:{port}{}", opts.path));
+    ensure_scope_host(&host, opts)?;
+    let origin = opts
+        .origin
+        .clone()
+        .unwrap_or_else(|| DEFAULT_CORS_ORIGIN.into());
+    let mut probe = opts.clone();
+    probe.method = "GET".into();
+    probe.body_bytes = 0;
+    probe.audit_headers = false;
+    probe.expect_status = None;
+    probe.skip_certificate = true;
+    probe.show_all_headers = false;
+    probe.show_headers = vec![
+        "access-control-allow-origin".into(),
+        "access-control-allow-credentials".into(),
+        "access-control-allow-methods".into(),
+        "access-control-allow-headers".into(),
+        "vary".into(),
+    ];
+    probe.headers.retain(|(name, _)| name != "origin");
+    probe.headers.push(("origin".into(), origin.clone()));
+    let result = http_probe(&url, &host, port, &probe);
+    let header = |name: &str| {
+        result
+            .headers
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.clone())
+    };
+    let allow_origin = header("access-control-allow-origin");
+    let allow_credentials = header("access-control-allow-credentials");
+    let allow_methods = header("access-control-allow-methods");
+    let allow_headers = header("access-control-allow-headers");
+    let vary = header("vary");
+    let findings = if result.status.is_some() {
+        analyze_cors(
+            allow_origin.as_deref(),
+            allow_credentials.as_deref(),
+            vary.as_deref(),
+            &origin,
+        )
+    } else {
+        vec![CorsFinding {
+            code: "request_failed".into(),
+            severity: "high".into(),
+            detail: result
+                .error
+                .clone()
+                .unwrap_or_else(|| "HTTP request failed".into()),
+        }]
+    };
+    Ok(CorsReport {
+        schema_version: 1,
+        version: VERSION.into(),
+        target: value.into(),
+        url,
+        origin,
+        status: result.status,
+        allow_origin,
+        allow_credentials,
+        allow_methods,
+        allow_headers,
+        vary,
+        ok: findings.is_empty(),
+        findings,
+        total_elapsed_ms: started.elapsed().as_millis(),
+        error: result.error,
+    })
+}
+
+fn print_cors_report(report: &CorsReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
+    match opts.output {
+        Output::Json => println!("{}", serde_json::to_string_pretty(report).unwrap()),
+        Output::Jsonl => {
+            if let Ok(line) = serde_json::to_string(report) {
+                println!("{line}");
+            }
+        }
+        Output::Csv => {
+            println!("target,status,origin,allow_origin,allow_credentials,findings,ok,error");
+            println!(
+                "{},{},{},{},{},{},{},{}",
+                csv_escape(&report.target),
+                report
+                    .status
+                    .map(|status| status.to_string())
+                    .unwrap_or_default(),
+                csv_escape(&report.origin),
+                csv_escape(report.allow_origin.as_deref().unwrap_or_default()),
+                csv_escape(report.allow_credentials.as_deref().unwrap_or_default()),
+                report.findings.len(),
+                report.ok,
+                csv_escape(report.error.as_deref().unwrap_or_default())
+            );
+        }
+        Output::Text => {
+            println!(
+                "CORS-CHECK {} (status {}, {} ms)",
+                report.url,
+                report
+                    .status
+                    .map(|status| status.to_string())
+                    .unwrap_or_else(|| "failed".into()),
+                report.total_elapsed_ms
+            );
+            println!("  origin sent: {}", report.origin);
+            for (label, value) in [
+                ("allow-origin", &report.allow_origin),
+                ("allow-credentials", &report.allow_credentials),
+                ("allow-methods", &report.allow_methods),
+                ("allow-headers", &report.allow_headers),
+                ("vary", &report.vary),
+            ] {
+                if let Some(value) = value {
+                    println!("  {label}: {value}");
+                }
+            }
+            if report.findings.is_empty() {
+                println!("  no CORS misconfiguration detected");
+            } else {
+                for finding in &report.findings {
+                    println!(
+                        "  FINDING [{}] {}: {}",
+                        finding.severity, finding.code, finding.detail
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
+struct CookieInfo {
+    name: String,
+    secure: bool,
+    http_only: bool,
+    same_site: Option<String>,
+    domain: Option<String>,
+    path: Option<String>,
+    max_age: Option<String>,
+    expires: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+struct CookieFinding {
+    cookie: String,
+    code: String,
+    severity: String,
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct CookieReport {
+    schema_version: u8,
+    version: String,
+    target: String,
+    url: String,
+    status: Option<u16>,
+    cookies: Vec<CookieInfo>,
+    findings: Vec<CookieFinding>,
+    ok: bool,
+    total_elapsed_ms: u128,
+    error: Option<String>,
+}
+
+fn analyze_set_cookie(values: &[String]) -> (Vec<CookieInfo>, Vec<CookieFinding>) {
+    let mut cookies = Vec::new();
+    let mut findings = Vec::new();
+    if values.is_empty() {
+        findings.push(CookieFinding {
+            cookie: String::new(),
+            code: "no_cookies".into(),
+            severity: "info".into(),
+            detail: "response did not set any cookies".into(),
+        });
+        return (cookies, findings);
+    }
+    for value in values {
+        let mut parts = value.split(';');
+        let first = parts.next().unwrap_or("").trim();
+        let (name, _) = first.split_once('=').unwrap_or((first, ""));
+        let name = name.trim();
+        if name.is_empty() {
+            findings.push(CookieFinding {
+                cookie: String::new(),
+                code: "malformed_cookie".into(),
+                severity: "medium".into(),
+                detail: "Set-Cookie header has no cookie name".into(),
+            });
+            continue;
+        }
+        let mut secure = false;
+        let mut http_only = false;
+        let mut same_site = None;
+        let mut domain = None;
+        let mut path = None;
+        let mut max_age = None;
+        let mut expires = None;
+        for attribute in parts {
+            let attribute = attribute.trim();
+            if attribute.is_empty() {
+                continue;
+            }
+            let (key, attribute_value) = attribute
+                .split_once('=')
+                .map(|(key, value)| (key.trim().to_ascii_lowercase(), value.trim().to_string()))
+                .unwrap_or_else(|| (attribute.to_ascii_lowercase(), String::new()));
+            match key.as_str() {
+                "secure" => secure = true,
+                "httponly" => http_only = true,
+                "samesite" => same_site = Some(attribute_value),
+                "domain" => domain = Some(attribute_value),
+                "path" => path = Some(attribute_value),
+                "max-age" => max_age = Some(attribute_value),
+                "expires" => expires = Some(attribute_value),
+                _ => {}
+            }
+        }
+        let lower_name = name.to_ascii_lowercase();
+        if lower_name.starts_with("__host-")
+            && (!secure || path.as_deref() != Some("/") || domain.is_some())
+        {
+            findings.push(CookieFinding {
+                cookie: name.into(),
+                code: "host_prefix_violation".into(),
+                severity: "high".into(),
+                detail: "__Host- cookie must be Secure, use Path=/, and omit Domain".into(),
+            });
+        } else if lower_name.starts_with("__secure-") && !secure {
+            findings.push(CookieFinding {
+                cookie: name.into(),
+                code: "secure_prefix_violation".into(),
+                severity: "high".into(),
+                detail: "__Secure- cookie is missing the Secure attribute".into(),
+            });
+        }
+        if !secure {
+            findings.push(CookieFinding {
+                cookie: name.into(),
+                code: "missing_secure".into(),
+                severity: "high".into(),
+                detail: "cookie is missing the Secure attribute".into(),
+            });
+        }
+        if !http_only {
+            findings.push(CookieFinding {
+                cookie: name.into(),
+                code: "missing_httponly".into(),
+                severity: "medium".into(),
+                detail: "cookie is missing the HttpOnly attribute".into(),
+            });
+        }
+        match same_site.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            None => findings.push(CookieFinding {
+                cookie: name.into(),
+                code: "missing_samesite".into(),
+                severity: "medium".into(),
+                detail: "cookie is missing the SameSite attribute".into(),
+            }),
+            Some("none") if !secure => findings.push(CookieFinding {
+                cookie: name.into(),
+                code: "samesite_none_without_secure".into(),
+                severity: "high".into(),
+                detail: "SameSite=None requires the Secure attribute".into(),
+            }),
+            Some("lax") | Some("strict") | Some("none") => {}
+            Some(_) => findings.push(CookieFinding {
+                cookie: name.into(),
+                code: "invalid_samesite".into(),
+                severity: "low".into(),
+                detail: "SameSite value is not Lax, Strict, or None".into(),
+            }),
+        }
+        cookies.push(CookieInfo {
+            name: name.into(),
+            secure,
+            http_only,
+            same_site,
+            domain,
+            path,
+            max_age,
+            expires,
+        });
+    }
+    (cookies, findings)
+}
+
+fn cookie_check(value: &str, opts: &Options) -> Result<CookieReport, String> {
+    let started = Instant::now();
+    let (host, port, url) = target(value)?;
+    let url = url.unwrap_or_else(|| format!("http://{host}:{port}{}", opts.path));
+    ensure_scope_host(&host, opts)?;
+    let mut probe = opts.clone();
+    probe.method = "GET".into();
+    probe.body_bytes = 0;
+    probe.audit_headers = false;
+    probe.expect_status = None;
+    probe.skip_certificate = true;
+    probe.show_all_headers = true;
+    probe.show_headers = vec!["set-cookie".into()];
+    let result = http_probe(&url, &host, port, &probe);
+    let values = result
+        .headers
+        .iter()
+        .filter(|(name, _)| name == "set-cookie")
+        .map(|(_, value)| value.clone())
+        .collect::<Vec<_>>();
+    let (cookies, findings) = analyze_set_cookie(&values);
+    let ok = !findings.iter().any(|finding| finding.severity != "info");
+    Ok(CookieReport {
+        schema_version: 1,
+        version: VERSION.into(),
+        target: value.into(),
+        url,
+        status: result.status,
+        cookies,
+        findings,
+        ok,
+        total_elapsed_ms: started.elapsed().as_millis(),
+        error: result.error,
+    })
+}
+
+fn print_cookie_report(report: &CookieReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
+    match opts.output {
+        Output::Json => println!("{}", serde_json::to_string_pretty(report).unwrap()),
+        Output::Jsonl => {
+            if let Ok(line) = serde_json::to_string(report) {
+                println!("{line}");
+            }
+        }
+        Output::Csv => {
+            println!("target,status,cookies,findings,ok,error");
+            println!(
+                "{},{},{},{},{},{}",
+                csv_escape(&report.target),
+                report
+                    .status
+                    .map(|status| status.to_string())
+                    .unwrap_or_default(),
+                report.cookies.len(),
+                report.findings.len(),
+                report.ok,
+                csv_escape(report.error.as_deref().unwrap_or_default())
+            );
+        }
+        Output::Text => {
+            println!(
+                "COOKIE-CHECK {} (status {}, {} cookie(s), {} ms)",
+                report.url,
+                report
+                    .status
+                    .map(|status| status.to_string())
+                    .unwrap_or_else(|| "failed".into()),
+                report.cookies.len(),
+                report.total_elapsed_ms
+            );
+            for cookie in &report.cookies {
+                println!(
+                    "  cookie {}: secure={} httponly={} samesite={} path={}",
+                    cookie.name,
+                    cookie.secure,
+                    cookie.http_only,
+                    cookie.same_site.as_deref().unwrap_or("None"),
+                    cookie.path.as_deref().unwrap_or("-")
+                );
+            }
+            if report.findings.is_empty() {
+                println!("  no cookie misconfiguration detected");
+            } else {
+                for finding in &report.findings {
+                    let cookie = if finding.cookie.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{} ", finding.cookie)
+                    };
+                    println!(
+                        "  FINDING [{}] {}{}: {}",
+                        finding.severity, cookie, finding.code, finding.detail
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[derive(Serialize, Clone)]
+struct MethodProbe {
+    method: String,
+    status: Option<u16>,
+    status_text: Option<String>,
+    elapsed_ms: u128,
+    allowed: bool,
+    error: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+struct MethodFinding {
+    code: String,
+    severity: String,
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct MethodReport {
+    schema_version: u8,
+    version: String,
+    target: String,
+    url: String,
+    allow: Option<String>,
+    advertised: Vec<String>,
+    probes: Vec<MethodProbe>,
+    findings: Vec<MethodFinding>,
+    ok: bool,
+    total_elapsed_ms: u128,
+    error: Option<String>,
+}
+
+fn parse_allow_header(value: Option<&str>) -> Vec<String> {
+    let mut methods = Vec::new();
+    if let Some(value) = value {
+        for part in value.split(',') {
+            let method = part.trim().to_ascii_uppercase();
+            if !method.is_empty() && !methods.contains(&method) {
+                methods.push(method);
+            }
+        }
+    }
+    methods
+}
+
+fn analyze_methods(allow: Option<&str>, probes: &[MethodProbe]) -> Vec<MethodFinding> {
+    let mut findings = Vec::new();
+    let advertised = parse_allow_header(allow);
+    let options_status = probes
+        .iter()
+        .find(|probe| probe.method == "OPTIONS")
+        .and_then(|probe| probe.status);
+    if options_status.is_some() && advertised.is_empty() {
+        findings.push(MethodFinding {
+            code: "allow_header_missing".into(),
+            severity: "info".into(),
+            detail: "OPTIONS response did not include an Allow header".into(),
+        });
+    }
+    let dangerous = advertised
+        .iter()
+        .filter(|method| matches!(method.as_str(), "PUT" | "DELETE" | "PATCH" | "CONNECT"))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !dangerous.is_empty() {
+        findings.push(MethodFinding {
+            code: "dangerous_methods_advertised".into(),
+            severity: "medium".into(),
+            detail: format!(
+                "Allow advertises state-changing or tunneling methods: {}",
+                dangerous.join(", ")
+            ),
+        });
+    }
+    if probes
+        .iter()
+        .any(|probe| probe.method == "TRACE" && probe.status == Some(200))
+    {
+        findings.push(MethodFinding {
+            code: "trace_enabled".into(),
+            severity: "medium".into(),
+            detail: "TRACE returned HTTP 200; cross-site tracing may expose request headers".into(),
+        });
+    }
+    findings
+}
+
+fn method_check(value: &str, opts: &Options) -> Result<MethodReport, String> {
+    let started = Instant::now();
+    let (host, port, url) = target(value)?;
+    let url = url.unwrap_or_else(|| format!("http://{host}:{port}{}", opts.path));
+    require_active_scope(&host, opts, "method-check")?;
+    let mut probes = Vec::new();
+    let mut allow = None;
+    let mut error = None;
+    for method in ["OPTIONS", "HEAD", "TRACE"] {
+        let mut probe = opts.clone();
+        probe.method = method.into();
+        probe.body_bytes = 0;
+        probe.audit_headers = false;
+        probe.expect_status = None;
+        probe.skip_certificate = true;
+        probe.show_all_headers = true;
+        probe.show_headers = vec!["allow".into(), "server".into(), "x-powered-by".into()];
+        let result = http_probe(&url, &host, port, &probe);
+        if method == "OPTIONS" {
+            allow = result
+                .headers
+                .iter()
+                .find(|(name, _)| name == "allow")
+                .map(|(_, value)| value.clone());
+        }
+        if error.is_none() {
+            error = result.error.clone();
+        }
+        probes.push(MethodProbe {
+            method: method.into(),
+            status: result.status,
+            status_text: result.status_text,
+            elapsed_ms: result.elapsed_ms,
+            allowed: result
+                .status
+                .map(|status| !matches!(status, 405 | 501))
+                .unwrap_or(false),
+            error: result.error,
+        });
+    }
+    let advertised = parse_allow_header(allow.as_deref());
+    let findings = analyze_methods(allow.as_deref(), &probes);
+    let ok = !findings
+        .iter()
+        .any(|finding| matches!(finding.severity.as_str(), "critical" | "high" | "medium"));
+    Ok(MethodReport {
+        schema_version: 1,
+        version: VERSION.into(),
+        target: value.into(),
+        url,
+        allow,
+        advertised,
+        probes,
+        findings,
+        ok,
+        total_elapsed_ms: started.elapsed().as_millis(),
+        error,
+    })
+}
+
+fn print_method_report(report: &MethodReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
+    match opts.output {
+        Output::Json => println!("{}", serde_json::to_string_pretty(report).unwrap()),
+        Output::Jsonl => {
+            if let Ok(line) = serde_json::to_string(report) {
+                println!("{line}");
+            }
+        }
+        Output::Csv => {
+            println!("target,status,allow,advertised,findings,ok,error");
+            let status = report
+                .probes
+                .iter()
+                .find(|probe| probe.method == "OPTIONS")
+                .and_then(|probe| probe.status);
+            println!(
+                "{},{},{},{},{},{},{}",
+                csv_escape(&report.target),
+                status.map(|value| value.to_string()).unwrap_or_default(),
+                csv_escape(report.allow.as_deref().unwrap_or_default()),
+                csv_escape(&report.advertised.join(" ")),
+                report.findings.len(),
+                report.ok,
+                csv_escape(report.error.as_deref().unwrap_or_default())
+            );
+        }
+        Output::Text => {
+            let status = report
+                .probes
+                .iter()
+                .find(|probe| probe.method == "OPTIONS")
+                .and_then(|probe| probe.status);
+            println!(
+                "METHOD-CHECK {} (status {}, {} probes, {} ms)",
+                report.url,
+                status
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "failed".into()),
+                report.probes.len(),
+                report.total_elapsed_ms
+            );
+            if report.advertised.is_empty() {
+                println!("  advertised methods: none");
+            } else {
+                println!("  advertised methods: {}", report.advertised.join(", "));
+            }
+            for probe in &report.probes {
+                println!(
+                    "  {} {} ({} ms, allowed={})",
+                    probe.method,
+                    probe
+                        .status
+                        .map(|status| status.to_string())
+                        .unwrap_or_else(|| "ERR".into()),
+                    probe.elapsed_ms,
+                    probe.allowed
+                );
+            }
+            if report.findings.is_empty() {
+                println!("  no method misconfiguration detected");
+            } else {
+                for finding in &report.findings {
+                    println!(
+                        "  FINDING [{}] {}: {}",
+                        finding.severity, finding.code, finding.detail
+                    );
+                }
+            }
+        }
+    }
+}
+
 //
 // Consent-gated loopback load testing.
 //
@@ -1665,27 +3582,58 @@ fn preview_bytes(payload: &[u8], limit: usize) -> String {
 // total request budget (<= 5000). No concurrency, no spoofing.
 //
 
-const ROTATING_USER_AGENTS: [&str; 8] = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
-    "Mozilla/5.0 (Linux; Android 10; SM-G975F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+const ROTATING_USER_AGENTS: [&str; 16] = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:140.0) Gecko/20100101 Firefox/140.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0",
+    "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/138.0.0.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Android 15; Mobile; rv:140.0) Gecko/140.0 Firefox/140.0",
+    "Mozilla/5.0 (iPad; CPU OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 OPR/122.0.0.0",
+    "Mozilla/5.0 (Linux; Android 15; SM-S938B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/28.0 Chrome/138.0.0.0 Mobile Safari/537.36",
 ];
 
-fn ensure_loopback(host: &str, family: Family) -> Result<(), String> {
+fn seed_random_state() -> u64 {
+    let time = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|value| value.as_nanos() as u64)
+        .unwrap_or(0x9E37_79B9_7F4A_7C15);
+    time ^ (std::process::id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+fn random_index(state: &mut u64, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    ((*state >> 33) as usize) % len
+}
+
+fn pick_random_user_agent() -> &'static str {
+    let mut state = seed_random_state();
+    ROTATING_USER_AGENTS[random_index(&mut state, ROTATING_USER_AGENTS.len())]
+}
+
+fn ensure_loopback(host: &str, family: Family, command: &str) -> Result<(), String> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         if !ip.is_loopback() {
-            return Err(
-                "load-test only accepts loopback targets: localhost, 127.0.0.1, or ::1".into(),
-            );
+            return Err(format!(
+                "{command} only accepts loopback targets: localhost, 127.0.0.1, or ::1"
+            ));
         }
     } else if !host.eq_ignore_ascii_case("localhost") {
         return Err(format!(
-            "load-test refuses non-loopback target \"{host}\": only localhost, 127.0.0.1, or ::1 are allowed"
+            "{command} refuses non-loopback target \"{host}\": only localhost, 127.0.0.1, or ::1 are allowed"
         ));
     }
     for address in resolve(host, 0, family)
@@ -1693,7 +3641,7 @@ fn ensure_loopback(host: &str, family: Family) -> Result<(), String> {
         .iter()
     {
         if !address.ip().is_loopback() {
-            return Err(format!("load-test refuses non-loopback address {address}"));
+            return Err(format!("{command} refuses non-loopback address {address}"));
         }
     }
     Ok(())
@@ -1714,6 +3662,7 @@ struct LoadTestReport {
     avg_ms: Option<u128>,
     max_ms: Option<u128>,
     rotate_user_agent: bool,
+    random_user_agent: bool,
     first_error: Option<String>,
     total_elapsed_ms: u128,
     actual_rate: f64,
@@ -1723,7 +3672,8 @@ fn load_test(value: &str, opts: &Options) -> Result<LoadTestReport, String> {
     let started = Instant::now();
     let (host, port, url) = target(value)?;
     let url = url.unwrap_or_else(|| format!("http://{host}:{port}{}", opts.path));
-    ensure_loopback(&host, opts.family)?;
+    ensure_scope_host(&host, opts)?;
+    ensure_loopback(&host, opts.family, "load-test")?;
 
     let interval = Duration::from_nanos(1_000_000_000 / u64::from(opts.rate).max(1));
     let mut sent = 0_u32;
@@ -1732,13 +3682,18 @@ fn load_test(value: &str, opts: &Options) -> Result<LoadTestReport, String> {
     let mut statuses: BTreeMap<String, u32> = BTreeMap::new();
     let mut first_error: Option<String> = None;
     let mut first_error_count = 0_u32;
+    let mut ua_state = seed_random_state();
 
     for index in 0..opts.count {
         let tick = Instant::now();
         let effective = if opts.rotate_user_agent {
             let mut per_request = opts.clone();
-            per_request.user_agent =
-                Some(ROTATING_USER_AGENTS[index as usize % ROTATING_USER_AGENTS.len()].into());
+            let index = if opts.random_user_agent {
+                random_index(&mut ua_state, ROTATING_USER_AGENTS.len())
+            } else {
+                index as usize % ROTATING_USER_AGENTS.len()
+            };
+            per_request.user_agent = Some(ROTATING_USER_AGENTS[index].into());
             per_request
         } else {
             opts.clone()
@@ -1783,6 +3738,7 @@ fn load_test(value: &str, opts: &Options) -> Result<LoadTestReport, String> {
         avg_ms: Some(latencies.iter().sum::<u128>() / latencies.len().max(1) as u128),
         max_ms: latencies.iter().max().copied(),
         rotate_user_agent: opts.rotate_user_agent,
+        random_user_agent: opts.random_user_agent,
         first_error: first_error.map(|error| {
             if first_error_count > 1 {
                 format!("{error} (+{first_error_count} more times)")
@@ -1798,11 +3754,13 @@ fn load_test(value: &str, opts: &Options) -> Result<LoadTestReport, String> {
 fn diagnose(value: &str, opts: &Options) -> Result<DiagnosticReport, String> {
     let started = Instant::now();
     let (host, port, url) = target(value)?;
+    scope_precheck_host(&host, opts)?;
     let resolved =
         resolve(&host, port, opts.family).map_err(|e| format!("DNS resolution failed: {e}"))?;
     if resolved.is_empty() {
         return Err("DNS resolution returned no addresses".into());
     }
+    scope_allows(&host, &resolved, opts)?;
     let results = addresses(&resolved, opts);
     let connected = results.iter().any(|v| v.connected);
     let http = url.as_deref().map(|v| http_probe(v, &host, port, opts));
@@ -1826,6 +3784,9 @@ fn diagnose(value: &str, opts: &Options) -> Result<DiagnosticReport, String> {
 }
 
 fn print_report(report: &DiagnosticReport, opts: &Options) {
+    if opts.quiet {
+        return;
+    }
     if opts.output == Output::Json {
         println!("{}", serde_json::to_string_pretty(report).unwrap());
         return;
@@ -1867,6 +3828,21 @@ fn print_report(report: &DiagnosticReport, opts: &Options) {
         for (name, value) in &http.headers {
             println!("  {name}: {value}");
         }
+        if let Some(checks) = &http.security_headers {
+            let present = checks.iter().filter(|check| check.present).count();
+            println!(
+                "  security headers: {present}/{} (score {}/100, grade {})",
+                checks.len(),
+                http.security_score.unwrap_or(0),
+                http.security_grade.as_deref().unwrap_or("?")
+            );
+            for check in checks {
+                match &check.value {
+                    Some(value) => println!("    {}: present ({value})", check.name),
+                    None => println!("    {}: missing", check.name),
+                }
+            }
+        }
         if let Some(size) = http.body_size {
             println!("  body: {size} bytes");
         }
@@ -1884,6 +3860,12 @@ fn print_report(report: &DiagnosticReport, opts: &Options) {
             if !certificate.sans.is_empty() {
                 println!("  SANs: {}", certificate.sans.join(", "));
             }
+            if let Some(protocol) = &certificate.protocol {
+                println!("  TLS protocol: {protocol}");
+            }
+            if let Some(cipher) = &certificate.cipher_suite {
+                println!("  cipher suite: {cipher}");
+            }
         }
         if let Some(error) = &http.certificate_error {
             println!("  TLS error: {error}");
@@ -1891,8 +3873,253 @@ fn print_report(report: &DiagnosticReport, opts: &Options) {
     }
 }
 
-fn print_report_csv(report: &DiagnosticReport) {
+fn md_cell(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace(['\r', '\n'], " ")
+}
+
+fn md_code(value: &str) -> String {
+    format!("`{}`", value.replace('`', "'"))
+}
+
+fn short_value(value: &str, limit: usize) -> String {
+    let truncated = value.chars().take(limit).collect::<String>();
+    if value.chars().count() > limit {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+fn format_unix_utc(seconds: u64) -> String {
+    let days = (seconds / 86_400) as i64;
+    let remainder = seconds % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        remainder / 3_600,
+        (remainder % 3_600) / 60,
+        remainder % 60
+    )
+}
+
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * month_prime + 2) / 5 + 1) as u32;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+fn markdown_report(report: &DiagnosticReport, opts: &Options) -> String {
+    let generated = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or(0);
+    let connected = report
+        .resolved
+        .iter()
+        .filter(|value| value.connected)
+        .count();
+    let mut out = String::new();
+    out.push_str("# ddos assessment report\n\n");
+    out.push_str(&format!("- **Target:** {}\n", md_code(&report.target)));
+    out.push_str(&format!(
+        "- **Tool version:** {}\n",
+        md_code(&report.version)
+    ));
+    out.push_str(&format!(
+        "- **Generated:** {}\n",
+        md_code(&format_unix_utc(generated))
+    ));
+    if let Some(scope) = &opts.scope {
+        out.push_str(&format!(
+            "- **Scope:** {}\n",
+            md_code(&scope.source.display().to_string())
+        ));
+    }
+    out.push_str(&format!(
+        "- **Result:** **{}**\n\n",
+        if report.ok { "PASS" } else { "FAIL" }
+    ));
+    out.push_str("## Summary\n\n| Check | Result | Detail |\n| --- | --- | --- |\n");
+    out.push_str(&format!(
+        "| DNS | {} | {} address(es) |\n",
+        if report.resolved.is_empty() {
+            "FAIL"
+        } else {
+            "PASS"
+        },
+        report.resolved.len()
+    ));
+    out.push_str(&format!(
+        "| TCP | {} | {} of {} addresses open |\n",
+        if connected > 0 { "PASS" } else { "FAIL" },
+        connected,
+        report.resolved.len()
+    ));
+    if let Some(http) = &report.http {
+        let status = match (http.status, &http.status_text) {
+            (Some(code), Some(text)) => format!("{code} {text}"),
+            (Some(code), None) => code.to_string(),
+            _ => "request failed".into(),
+        };
+        out.push_str(&format!(
+            "| HTTP | {} | {} |\n",
+            if http.status_ok { "PASS" } else { "FAIL" },
+            md_cell(&status)
+        ));
+    } else {
+        out.push_str("| HTTP | N/A | no HTTP/HTTPS URL requested |\n");
+    }
+    if let Some(http) = &report.http {
+        match (&http.certificate, &http.certificate_error) {
+            (Some(certificate), _) => out.push_str(&format!(
+                "| TLS | {} | {} expires {} |\n",
+                if certificate.expired { "FAIL" } else { "PASS" },
+                md_cell(&certificate.subject),
+                md_cell(&certificate.not_after)
+            )),
+            (None, Some(error)) => out.push_str(&format!("| TLS | FAIL | {} |\n", md_cell(error))),
+            (None, None) => out.push_str("| TLS | N/A | not an HTTPS target |\n"),
+        }
+        if let Some(checks) = &http.security_headers {
+            let present = checks.iter().filter(|value| value.present).count();
+            out.push_str(&format!(
+                "| Security headers | {} | {} of {} present (grade {}, {}/100) |\n",
+                if present == checks.len() {
+                    "PASS"
+                } else {
+                    "WARN"
+                },
+                present,
+                checks.len(),
+                http.security_grade.as_deref().unwrap_or("?"),
+                http.security_score.unwrap_or(0)
+            ));
+        } else {
+            out.push_str("| Security headers | N/A | header audit not enabled |\n");
+        }
+    } else {
+        out.push_str("| TLS | N/A | no HTTP/HTTPS URL requested |\n");
+        out.push_str("| Security headers | N/A | no HTTP/HTTPS URL requested |\n");
+    }
+    out.push_str("\n## Addresses\n\n");
+    if report.resolved.is_empty() {
+        out.push_str("No addresses returned.\n");
+    } else {
+        out.push_str("| Family | Address | Open | Latency |\n| --- | --- | --- | --- |\n");
+        for result in &report.resolved {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} ms |\n",
+                result.family,
+                md_code(&result.address),
+                if result.connected { "yes" } else { "no" },
+                result.elapsed_ms
+            ));
+        }
+    }
+    if let Some(http) = &report.http {
+        out.push_str("\n## HTTP\n\n");
+        out.push_str(&format!("- **URL:** {}\n", md_code(&http.url)));
+        out.push_str(&format!(
+            "- **Status:** {}\n",
+            http.status
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "failed".into())
+        ));
+        if let Some(text) = &http.status_text {
+            out.push_str(&format!("- **Status text:** {}\n", md_cell(text)));
+        }
+        if let Some(size) = http.body_size {
+            out.push_str(&format!("- **Body bytes read:** {size}\n"));
+        }
+        if let Some(error) = &http.error {
+            out.push_str(&format!("- **Error:** {}\n", md_cell(error)));
+        }
+        if let Some(checks) = &http.security_headers {
+            out.push_str(&format!(
+                "\n### Security headers (grade {}, {}/100)\n\n| Header | Present | Value |\n| --- | --- | --- |\n",
+                http.security_grade.as_deref().unwrap_or("?"),
+                http.security_score.unwrap_or(0)
+            ));
+            for check in checks {
+                let value = check
+                    .value
+                    .as_deref()
+                    .map(|value| short_value(value, 120))
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    "| {} | {} | {} |\n",
+                    md_code(&check.name),
+                    if check.present { "yes" } else { "no" },
+                    md_cell(&value)
+                ));
+            }
+        }
+    }
+    if let Some(certificate) = report
+        .http
+        .as_ref()
+        .and_then(|value| value.certificate.as_ref())
+    {
+        out.push_str("\n## TLS certificate\n\n");
+        out.push_str(&format!(
+            "- **Subject:** {}\n",
+            md_cell(&certificate.subject)
+        ));
+        out.push_str(&format!("- **Issuer:** {}\n", md_cell(&certificate.issuer)));
+        out.push_str(&format!("- **Serial:** {}\n", md_code(&certificate.serial)));
+        out.push_str(&format!(
+            "- **Valid from:** {}\n",
+            md_cell(&certificate.not_before)
+        ));
+        out.push_str(&format!(
+            "- **Expires:** {}\n",
+            md_cell(&certificate.not_after)
+        ));
+        out.push_str(&format!("- **Expired:** {}\n", certificate.expired));
+        if let Some(protocol) = &certificate.protocol {
+            out.push_str(&format!("- **Protocol:** {}\n", md_code(protocol)));
+        }
+        if let Some(cipher) = &certificate.cipher_suite {
+            out.push_str(&format!("- **Cipher suite:** {}\n", md_code(cipher)));
+        }
+        if !certificate.sans.is_empty() {
+            out.push_str(&format!(
+                "- **SANs:** {}\n",
+                md_cell(&certificate.sans.join(", "))
+            ));
+        }
+    }
+    out.push_str("\n## Notes\n\nAutomated, bounded checks only. This report does not exploit findings, scan ranges, or replace a full manual assessment.\n");
+    out
+}
+
+fn print_markdown_report(report: &DiagnosticReport, opts: &Options) {
+    if opts.quiet {
+        return;
+    }
+    print!("{}", markdown_report(report, opts));
+}
+
+fn print_report_csv_header() {
     println!("target,ok,host,port,total_elapsed_ms,addresses,connected,http_status,error");
+}
+
+fn print_report_csv_row(report: &DiagnosticReport) {
     let connected = report.resolved.iter().filter(|v| v.connected).count();
     println!(
         "{},{},{},{},{},{},{},{},{}",
@@ -1913,6 +4140,11 @@ fn print_report_csv(report: &DiagnosticReport) {
     );
 }
 
+fn print_report_csv(report: &DiagnosticReport) {
+    print_report_csv_header();
+    print_report_csv_row(report);
+}
+
 /// Emit one DiagnosticReport in the configured output format.
 fn print_report_one(report: &DiagnosticReport, opts: &Options) {
     match opts.output {
@@ -1928,6 +4160,9 @@ fn print_report_one(report: &DiagnosticReport, opts: &Options) {
 }
 
 fn print_udp_report(report: &UdpReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
     match opts.output {
         Output::Text => {
             println!(
@@ -1986,6 +4221,9 @@ fn print_udp_report(report: &UdpReport, opts: &Options) {
 }
 
 fn print_load_test_report(report: &LoadTestReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
     match opts.output {
         Output::Json => {
             println!(
@@ -2039,7 +4277,9 @@ fn print_load_test_report(report: &LoadTestReport, opts: &Options) {
                 report.min_ms.unwrap_or_default(),
                 report.avg_ms.unwrap_or_default(),
                 report.max_ms.unwrap_or_default(),
-                if report.rotate_user_agent {
+                if report.random_user_agent {
+                    " (user agents randomized)"
+                } else if report.rotate_user_agent {
                     " (user agents rotated)"
                 } else {
                     ""
@@ -2052,7 +4292,883 @@ fn print_load_test_report(report: &LoadTestReport, opts: &Options) {
     }
 }
 
+// --- Bounded capacity and resilience tests ---------------------------------
+//
+// Every command in this section is loopback-only, runs without concurrency,
+// and stays inside hard request, connection, and duration budgets. They are
+// measurement tools for servers you run yourself, not traffic generators.
+
+fn percentile(values: &[u128], percent: u64) -> Option<u128> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let rank = (sorted.len() as u64 * percent.min(100)) / 100;
+    let index = rank.saturating_sub(1) as usize;
+    Some(sorted[index.min(sorted.len() - 1)])
+}
+
+fn loopback_address(host: &str, port: u16, opts: &Options) -> Result<SocketAddr, String> {
+    let resolved = resolve(host, port, opts.family)
+        .map_err(|error| format!("DNS resolution failed: {error}"))?;
+    resolved
+        .iter()
+        .find(|address| address.ip().is_loopback())
+        .copied()
+        .ok_or_else(|| format!("no loopback address found for {host}"))
+}
+
+#[derive(Serialize)]
+struct CapacityStep {
+    step: u32,
+    target_rate: u32,
+    requests: u32,
+    ok: u32,
+    failed: u32,
+    avg_ms: Option<u128>,
+    p95_ms: Option<u128>,
+    max_ms: Option<u128>,
+    achieved_rate: f64,
+    degraded: bool,
+}
+
+#[derive(Serialize)]
+struct CapacityReport {
+    schema_version: u8,
+    version: String,
+    target: String,
+    max_rate: u32,
+    budget: u32,
+    steps: Vec<CapacityStep>,
+    total_requests: u32,
+    total_ok: u32,
+    total_failed: u32,
+    stopped_early: bool,
+    stop_reason: Option<String>,
+    total_elapsed_ms: u128,
+}
+
+/// Ramp the request rate in steps and record where the target starts to
+/// degrade. Stops at the first step that shows errors or high latency.
+fn capacity_test(value: &str, opts: &Options) -> Result<CapacityReport, String> {
+    let started = Instant::now();
+    let (host, port, url) = target(value)?;
+    let url = url.unwrap_or_else(|| format!("http://{host}:{port}{}", opts.path));
+    ensure_scope_host(&host, opts)?;
+    ensure_loopback(&host, opts.family, "capacity-test")?;
+
+    let max_rate = opts.rate.min(MAX_LOAD_RATE as u32).max(1);
+    let budget = opts.count.min(MAX_CAPACITY_REQUESTS as u32);
+    let step_count = opts.steps.clamp(1, MAX_CAPACITY_STEPS as u32);
+    let per_step = (budget / step_count).max(1);
+
+    let mut rows: Vec<CapacityStep> = Vec::new();
+    let mut total_ok = 0_u32;
+    let mut total_failed = 0_u32;
+    let mut stopped_early = false;
+    let mut stop_reason: Option<String> = None;
+
+    for index in 0..step_count {
+        let target_rate =
+            ((u64::from(max_rate) * u64::from(index + 1)) / u64::from(step_count)).max(1) as u32;
+        let interval = Duration::from_nanos(1_000_000_000 / u64::from(target_rate));
+        let step_started = Instant::now();
+        let mut ok = 0_u32;
+        let mut failed = 0_u32;
+        let mut latencies: Vec<u128> = Vec::new();
+        for _ in 0..per_step {
+            let tick = Instant::now();
+            let result = http_probe(&url, &host, port, opts);
+            match result.status {
+                Some(status) if status < 500 => ok += 1,
+                _ => failed += 1,
+            }
+            latencies.push(result.elapsed_ms);
+            let spent = tick.elapsed();
+            if spent < interval {
+                thread::sleep(interval - spent);
+            }
+        }
+        let elapsed = step_started.elapsed().as_millis().max(1);
+        let avg = Some(latencies.iter().sum::<u128>() / latencies.len().max(1) as u128);
+        let p95 = percentile(&latencies, 95);
+        let max = latencies.iter().max().copied();
+        let error_percent = u64::from(failed) * 100 / u64::from(per_step);
+        let degraded = (failed > 0 && error_percent >= DEGRADED_ERROR_PERCENT)
+            || p95
+                .map(|value| value >= DEGRADED_LATENCY_MS)
+                .unwrap_or(false);
+        total_ok += ok;
+        total_failed += failed;
+        rows.push(CapacityStep {
+            step: index + 1,
+            target_rate,
+            requests: per_step,
+            ok,
+            failed,
+            avg_ms: avg,
+            p95_ms: p95,
+            max_ms: max,
+            achieved_rate: f64::from(per_step) / (elapsed as f64 / 1000.0),
+            degraded,
+        });
+        if degraded {
+            stopped_early = true;
+            stop_reason = Some(format!(
+                "step {} degraded at {} req/s ({} of {} failed, p95 {} ms)",
+                index + 1,
+                target_rate,
+                failed,
+                per_step,
+                p95.unwrap_or_default()
+            ));
+            break;
+        }
+    }
+
+    Ok(CapacityReport {
+        schema_version: 1,
+        version: VERSION.into(),
+        target: value.into(),
+        max_rate,
+        budget,
+        total_requests: total_ok + total_failed,
+        total_ok,
+        total_failed,
+        steps: rows,
+        stopped_early,
+        stop_reason,
+        total_elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+#[derive(Serialize)]
+struct ChurnReport {
+    schema_version: u8,
+    version: String,
+    target: String,
+    attempted: u32,
+    connected: u32,
+    failed: u32,
+    avg_connect_ms: Option<u128>,
+    p95_connect_ms: Option<u128>,
+    max_connect_ms: Option<u128>,
+    first_failure_at: Option<u32>,
+    first_error: Option<String>,
+    total_elapsed_ms: u128,
+}
+
+/// Open and immediately close TCP connections to expose accept-backlog and
+/// file-descriptor limits. Sequential and rate limited.
+fn connection_churn(host: &str, port: u16, opts: &Options) -> Result<ChurnReport, String> {
+    let started = Instant::now();
+    ensure_scope_host(host, opts)?;
+    ensure_loopback(host, opts.family, "connection-churn")?;
+    let address = loopback_address(host, port, opts)?;
+    let count = opts.count.min(MAX_CHURN_CONNECTIONS as u32);
+    let interval =
+        Duration::from_nanos(1_000_000_000 / u64::from(opts.rate.clamp(1, MAX_LOAD_RATE as u32)));
+
+    let mut connected = 0_u32;
+    let mut failed = 0_u32;
+    let mut latencies: Vec<u128> = Vec::new();
+    let mut first_failure_at: Option<u32> = None;
+    let mut first_error: Option<String> = None;
+
+    for index in 0..count {
+        let tick = Instant::now();
+        match TcpStream::connect_timeout(&address, opts.timeout) {
+            Ok(stream) => {
+                connected += 1;
+                latencies.push(tick.elapsed().as_millis());
+                drop(stream);
+            }
+            Err(error) => {
+                failed += 1;
+                if first_failure_at.is_none() {
+                    first_failure_at = Some(index + 1);
+                    first_error = Some(error.to_string());
+                }
+            }
+        }
+        let spent = tick.elapsed();
+        if spent < interval {
+            thread::sleep(interval - spent);
+        }
+    }
+
+    Ok(ChurnReport {
+        schema_version: 1,
+        version: VERSION.into(),
+        target: format!("{host}:{port}"),
+        attempted: count,
+        connected,
+        failed,
+        avg_connect_ms: Some(latencies.iter().sum::<u128>() / latencies.len().max(1) as u128),
+        p95_connect_ms: percentile(&latencies, 95),
+        max_connect_ms: latencies.iter().max().copied(),
+        first_failure_at,
+        first_error,
+        total_elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+#[derive(Serialize)]
+struct SlowClientResult {
+    id: u32,
+    connected: bool,
+    bytes_sent: usize,
+    server_closed_after_ms: Option<u128>,
+    elapsed_ms: u128,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SlowRequestReport {
+    schema_version: u8,
+    version: String,
+    target: String,
+    clients: u32,
+    hold_seconds: u64,
+    results: Vec<SlowClientResult>,
+    server_closed: u32,
+    still_open: u32,
+    total_elapsed_ms: u128,
+}
+
+/// Hold a small number of incomplete HTTP requests open to find out how long
+/// the server keeps a slow client before it times out. Client count and hold
+/// time are hard-capped, and only loopback targets are accepted.
+fn slow_request(host: &str, port: u16, opts: &Options) -> Result<SlowRequestReport, String> {
+    let started = Instant::now();
+    ensure_scope_host(host, opts)?;
+    ensure_loopback(host, opts.family, "slow-request")?;
+    let address = loopback_address(host, port, opts)?;
+    let clients = opts.clients.clamp(1, MAX_SLOW_CLIENTS as u32);
+    let hold = opts.hold_seconds.clamp(1, MAX_SLOW_HOLD_SECONDS);
+    let path = opts.path.clone();
+    let host_name = host.to_string();
+    let timeout = opts.timeout;
+
+    let mut handles = Vec::new();
+    for index in 0..clients {
+        let path = path.clone();
+        let host_name = host_name.clone();
+        handles.push(thread::spawn(move || {
+            let client_started = Instant::now();
+            let mut result = SlowClientResult {
+                id: index + 1,
+                connected: false,
+                bytes_sent: 0,
+                server_closed_after_ms: None,
+                elapsed_ms: 0,
+                error: None,
+            };
+            let mut stream = match TcpStream::connect_timeout(&address, timeout) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    result.error = Some(error.to_string());
+                    result.elapsed_ms = client_started.elapsed().as_millis();
+                    return result;
+                }
+            };
+            result.connected = true;
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let _ = stream.set_write_timeout(Some(timeout));
+            let head = format!("GET {path} HTTP/1.1\r\nHost: {host_name}\r\n");
+            if let Err(error) = stream.write_all(head.as_bytes()) {
+                result.error = Some(error.to_string());
+                result.elapsed_ms = client_started.elapsed().as_millis();
+                return result;
+            }
+            result.bytes_sent += head.len();
+            let deadline = Instant::now() + Duration::from_secs(hold);
+            let mut last_send = Instant::now();
+            while Instant::now() < deadline {
+                let mut buffer = [0_u8; 64];
+                match stream.read(&mut buffer) {
+                    Ok(0) => {
+                        result.server_closed_after_ms = Some(client_started.elapsed().as_millis());
+                        break;
+                    }
+                    Ok(_) => {
+                        result.server_closed_after_ms = Some(client_started.elapsed().as_millis());
+                        break;
+                    }
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            || error.kind() == io::ErrorKind::TimedOut => {}
+                    Err(error) => {
+                        result.error = Some(error.to_string());
+                        break;
+                    }
+                }
+                if last_send.elapsed() >= Duration::from_millis(500) {
+                    let filler = b"X-Slow: a\r\n";
+                    if let Err(error) = stream.write_all(filler) {
+                        result.error = Some(error.to_string());
+                        break;
+                    }
+                    result.bytes_sent += filler.len();
+                    last_send = Instant::now();
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            result.elapsed_ms = client_started.elapsed().as_millis();
+            result
+        }));
+    }
+
+    let mut results = Vec::new();
+    for handle in handles {
+        match handle.join() {
+            Ok(result) => results.push(result),
+            Err(_) => results.push(SlowClientResult {
+                id: 0,
+                connected: false,
+                bytes_sent: 0,
+                server_closed_after_ms: None,
+                elapsed_ms: 0,
+                error: Some("client thread panicked".into()),
+            }),
+        }
+    }
+    results.sort_by_key(|result| result.id);
+    let server_closed = results
+        .iter()
+        .filter(|result| result.server_closed_after_ms.is_some())
+        .count() as u32;
+    let still_open = results
+        .iter()
+        .filter(|result| result.connected && result.server_closed_after_ms.is_none())
+        .count() as u32;
+
+    Ok(SlowRequestReport {
+        schema_version: 1,
+        version: VERSION.into(),
+        target: format!("{host}:{port}"),
+        clients,
+        hold_seconds: hold,
+        results,
+        server_closed,
+        still_open,
+        total_elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+#[derive(Clone)]
+struct ShapeVariant {
+    label: String,
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct ShapeCase {
+    index: u32,
+    label: String,
+    method: String,
+    path: String,
+    status: Option<u16>,
+    elapsed_ms: u128,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ShapeReport {
+    schema_version: u8,
+    version: String,
+    target: String,
+    cases: Vec<ShapeCase>,
+    total: u32,
+    successes: u32,
+    client_errors: u32,
+    server_errors: u32,
+    transport_errors: u32,
+    first_error: Option<String>,
+    total_elapsed_ms: u128,
+}
+
+fn shape_variants(path: &str) -> Vec<ShapeVariant> {
+    let long_query = format!("/?q={}", "a".repeat(512));
+    let long_path = format!("/{}", "segment/".repeat(96));
+    let long_value = "v".repeat(1024);
+    vec![
+        ShapeVariant {
+            label: "baseline GET".into(),
+            method: "GET".into(),
+            path: path.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        },
+        ShapeVariant {
+            label: "HEAD request".into(),
+            method: "HEAD".into(),
+            path: path.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        },
+        ShapeVariant {
+            label: "POST with small body".into(),
+            method: "POST".into(),
+            path: path.into(),
+            headers: vec![("Content-Type".into(), "text/plain".into())],
+            body: b"hello".to_vec(),
+        },
+        ShapeVariant {
+            label: "PUT with json body".into(),
+            method: "PUT".into(),
+            path: path.into(),
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: b"{\"probe\":1}".to_vec(),
+        },
+        ShapeVariant {
+            label: "DELETE request".into(),
+            method: "DELETE".into(),
+            path: path.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        },
+        ShapeVariant {
+            label: "OPTIONS request".into(),
+            method: "OPTIONS".into(),
+            path: path.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        },
+        ShapeVariant {
+            label: "PATCH request".into(),
+            method: "PATCH".into(),
+            path: path.into(),
+            headers: Vec::new(),
+            body: b"x".to_vec(),
+        },
+        ShapeVariant {
+            label: "long query string".into(),
+            method: "GET".into(),
+            path: long_query,
+            headers: Vec::new(),
+            body: Vec::new(),
+        },
+        ShapeVariant {
+            label: "long path".into(),
+            method: "GET".into(),
+            path: long_path,
+            headers: Vec::new(),
+            body: Vec::new(),
+        },
+        ShapeVariant {
+            label: "encoded space in path".into(),
+            method: "GET".into(),
+            path: "/path%20with%20spaces".into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        },
+        ShapeVariant {
+            label: "null byte in path".into(),
+            method: "GET".into(),
+            path: "/a%00b".into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        },
+        ShapeVariant {
+            label: "invalid utf-8 in path".into(),
+            method: "GET".into(),
+            path: "/%ff%fe".into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        },
+        ShapeVariant {
+            label: "long header value".into(),
+            method: "GET".into(),
+            path: path.into(),
+            headers: vec![("X-Long".into(), long_value)],
+            body: Vec::new(),
+        },
+        ShapeVariant {
+            label: "empty header value".into(),
+            method: "GET".into(),
+            path: path.into(),
+            headers: vec![("X-Empty".into(), String::new())],
+            body: Vec::new(),
+        },
+        ShapeVariant {
+            label: "duplicate header names".into(),
+            method: "GET".into(),
+            path: path.into(),
+            headers: vec![("X-Dup".into(), "1".into()), ("X-Dup".into(), "2".into())],
+            body: Vec::new(),
+        },
+        ShapeVariant {
+            label: "oversized body".into(),
+            method: "POST".into(),
+            path: path.into(),
+            headers: vec![("Content-Type".into(), "application/octet-stream".into())],
+            body: vec![b'a'; 4096],
+        },
+    ]
+}
+
+/// Send a fixed set of request shapes to a server and record how it reacts to
+/// unusual methods, paths, headers, and bodies.
+fn request_shape(value: &str, opts: &Options) -> Result<ShapeReport, String> {
+    let started = Instant::now();
+    let (host, port, _url) = target(value)?;
+    let scheme = if value.starts_with("https://") {
+        "https"
+    } else {
+        "http"
+    };
+    let base = format!("{scheme}://{host}:{port}");
+    ensure_scope_host(&host, opts)?;
+    ensure_loopback(&host, opts.family, "request-shape")?;
+
+    let count = opts.count.min(MAX_SHAPE_REQUESTS as u32);
+    let variants = shape_variants(&opts.path);
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(opts.timeout)
+        .timeout_read(opts.timeout)
+        .timeout_write(opts.timeout)
+        .redirects(0)
+        .user_agent(USER_AGENT)
+        .build();
+
+    let mut cases: Vec<ShapeCase> = Vec::new();
+    let mut successes = 0_u32;
+    let mut client_errors = 0_u32;
+    let mut server_errors = 0_u32;
+    let mut transport_errors = 0_u32;
+    let mut first_error: Option<String> = None;
+
+    for index in 0..count {
+        let variant = &variants[(index as usize) % variants.len()];
+        let url = format!("{base}{}", variant.path);
+        let case_started = Instant::now();
+        let mut request = agent.request(&variant.method, &url);
+        for (name, value) in &variant.headers {
+            request = request.set(name, value);
+        }
+        let outcome = if variant.body.is_empty() {
+            request.call()
+        } else {
+            request.send_bytes(&variant.body)
+        };
+        let (status, error) = match outcome {
+            Ok(response) => (Some(response.status()), None),
+            Err(ureq::Error::Status(code, _)) => (Some(code), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        match status {
+            Some(code) if (200..300).contains(&code) => successes += 1,
+            Some(code) if (400..500).contains(&code) => client_errors += 1,
+            Some(code) if code >= 500 => server_errors += 1,
+            Some(_) => {}
+            None => {
+                transport_errors += 1;
+                if first_error.is_none() {
+                    first_error = error.clone();
+                }
+            }
+        }
+        cases.push(ShapeCase {
+            index: index + 1,
+            label: variant.label.clone(),
+            method: variant.method.clone(),
+            path: variant.path.clone(),
+            status,
+            elapsed_ms: case_started.elapsed().as_millis(),
+            error,
+        });
+    }
+
+    Ok(ShapeReport {
+        schema_version: 1,
+        version: VERSION.into(),
+        target: value.into(),
+        total: count,
+        successes,
+        client_errors,
+        server_errors,
+        transport_errors,
+        cases,
+        first_error,
+        total_elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+fn print_capacity_report(report: &CapacityReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
+    match opts.output {
+        Output::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(report).expect("report serializes")
+            );
+        }
+        Output::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string(report).expect("report serializes")
+            );
+        }
+        Output::Csv => {
+            println!("target,step,target_rate,requests,ok,failed,avg_ms,p95_ms,max_ms,achieved_rate,degraded");
+            for step in &report.steps {
+                println!(
+                    "{},{},{},{},{},{},{},{},{},{:.1},{}",
+                    csv_escape(&report.target),
+                    step.step,
+                    step.target_rate,
+                    step.requests,
+                    step.ok,
+                    step.failed,
+                    step.avg_ms.unwrap_or_default(),
+                    step.p95_ms.unwrap_or_default(),
+                    step.max_ms.unwrap_or_default(),
+                    step.achieved_rate,
+                    step.degraded
+                );
+            }
+        }
+        Output::Text => {
+            println!(
+                "CAPACITY-TEST {} max {} req/s, {} requests, {} ok, {} failed ({} ms total)",
+                report.target,
+                report.max_rate,
+                report.total_requests,
+                report.total_ok,
+                report.total_failed,
+                report.total_elapsed_ms
+            );
+            for step in &report.steps {
+                println!(
+                    "  step {} target {} req/s: {} requests, {} ok, {} failed, avg {} ms, p95 {} ms, max {} ms, {:.1} req/s actual{}",
+                    step.step,
+                    step.target_rate,
+                    step.requests,
+                    step.ok,
+                    step.failed,
+                    step.avg_ms.unwrap_or_default(),
+                    step.p95_ms.unwrap_or_default(),
+                    step.max_ms.unwrap_or_default(),
+                    step.achieved_rate,
+                    if step.degraded { " [degraded]" } else { "" }
+                );
+            }
+            if let Some(reason) = &report.stop_reason {
+                println!("  stopped early: {reason}");
+            }
+        }
+    }
+}
+
+fn print_churn_report(report: &ChurnReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
+    match opts.output {
+        Output::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(report).expect("report serializes")
+            );
+        }
+        Output::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string(report).expect("report serializes")
+            );
+        }
+        Output::Csv => {
+            println!("target,attempted,connected,failed,avg_connect_ms,p95_connect_ms,max_connect_ms,first_failure_at,total_elapsed_ms");
+            println!(
+                "{},{},{},{},{},{},{},{},{}",
+                csv_escape(&report.target),
+                report.attempted,
+                report.connected,
+                report.failed,
+                report.avg_connect_ms.unwrap_or_default(),
+                report.p95_connect_ms.unwrap_or_default(),
+                report.max_connect_ms.unwrap_or_default(),
+                report
+                    .first_failure_at
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                report.total_elapsed_ms
+            );
+        }
+        Output::Text => {
+            println!(
+                "CONNECTION-CHURN {} attempted {} connected {} failed {} ({} ms total)",
+                report.target,
+                report.attempted,
+                report.connected,
+                report.failed,
+                report.total_elapsed_ms
+            );
+            println!(
+                "  connect latency avg {} ms p95 {} ms max {} ms",
+                report.avg_connect_ms.unwrap_or_default(),
+                report.p95_connect_ms.unwrap_or_default(),
+                report.max_connect_ms.unwrap_or_default()
+            );
+            if let Some(attempt) = report.first_failure_at {
+                println!(
+                    "  first failure at connection {attempt}: {}",
+                    report.first_error.as_deref().unwrap_or("unknown error")
+                );
+            } else {
+                println!("  no connection failures observed");
+            }
+        }
+    }
+}
+
+fn print_slow_report(report: &SlowRequestReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
+    match opts.output {
+        Output::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(report).expect("report serializes")
+            );
+        }
+        Output::Jsonl => {
+            for result in &report.results {
+                if let Ok(line) = serde_json::to_string(result) {
+                    println!("{line}");
+                }
+            }
+        }
+        Output::Csv => {
+            println!("target,client,connected,bytes_sent,server_closed_after_ms,elapsed_ms,error");
+            for result in &report.results {
+                println!(
+                    "{},{},{},{},{},{},{}",
+                    csv_escape(&report.target),
+                    result.id,
+                    result.connected,
+                    result.bytes_sent,
+                    result
+                        .server_closed_after_ms
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    result.elapsed_ms,
+                    csv_escape(result.error.as_deref().unwrap_or(""))
+                );
+            }
+        }
+        Output::Text => {
+            println!(
+                "SLOW-REQUEST {} clients {} hold {}s: {} closed by server, {} still open ({} ms total)",
+                report.target,
+                report.clients,
+                report.hold_seconds,
+                report.server_closed,
+                report.still_open,
+                report.total_elapsed_ms
+            );
+            for result in &report.results {
+                println!(
+                    "  client {}: connected {}, sent {} bytes, server closed after {} ms{}",
+                    result.id,
+                    result.connected,
+                    result.bytes_sent,
+                    result
+                        .server_closed_after_ms
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "never".into()),
+                    match &result.error {
+                        Some(error) => format!(" (error: {error})"),
+                        None => String::new(),
+                    }
+                );
+            }
+        }
+    }
+}
+
+fn print_shape_report(report: &ShapeReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
+    match opts.output {
+        Output::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(report).expect("report serializes")
+            );
+        }
+        Output::Jsonl => {
+            for case in &report.cases {
+                if let Ok(line) = serde_json::to_string(case) {
+                    println!("{line}");
+                }
+            }
+        }
+        Output::Csv => {
+            println!("index,label,method,path,status,elapsed_ms,error");
+            for case in &report.cases {
+                println!(
+                    "{},{},{},{},{},{},{}",
+                    case.index,
+                    csv_escape(&case.label),
+                    csv_escape(&case.method),
+                    csv_escape(&case.path),
+                    case.status
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    case.elapsed_ms,
+                    csv_escape(case.error.as_deref().unwrap_or(""))
+                );
+            }
+        }
+        Output::Text => {
+            println!(
+                "REQUEST-SHAPE {} {} requests: {} ok, {} client errors, {} server errors, {} transport errors ({} ms total)",
+                report.target,
+                report.total,
+                report.successes,
+                report.client_errors,
+                report.server_errors,
+                report.transport_errors,
+                report.total_elapsed_ms
+            );
+            for case in &report.cases {
+                println!(
+                    "  {:>3} {} {} {} -> {} ({} ms){}",
+                    case.index,
+                    case.method,
+                    case.label,
+                    case.path,
+                    case.status
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "no response".into()),
+                    case.elapsed_ms,
+                    match &case.error {
+                        Some(error) => format!(" ({error})"),
+                        None => String::new(),
+                    }
+                );
+            }
+            if let Some(error) = &report.first_error {
+                println!("  first transport error: {error}");
+            }
+        }
+    }
+}
+
 fn print_dns_report(report: &DnsReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
     match opts.output {
         Output::Text => {
             println!(
@@ -2105,6 +5221,100 @@ fn print_dns_report(report: &DnsReport, opts: &Options) {
     }
 }
 
+fn print_tls_report(report: &TlsReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
+    match opts.output {
+        Output::Text => {
+            println!(
+                "{} TLS {}:{} ({} ms)",
+                if report.ok { "OK" } else { "FAIL" },
+                report.host,
+                report.port,
+                report.total_elapsed_ms
+            );
+            if let Some(certificate) = &report.certificate {
+                println!(
+                    "TLS: {} -> {} (expires {}) serial {}",
+                    certificate.subject,
+                    certificate.issuer,
+                    certificate.not_after,
+                    certificate.serial
+                );
+                println!("  valid from: {}", certificate.not_before);
+                println!("  expired: {}", certificate.expired);
+                if let Some(protocol) = &certificate.protocol {
+                    println!("  protocol: {protocol}");
+                }
+                if let Some(cipher) = &certificate.cipher_suite {
+                    println!("  cipher suite: {cipher}");
+                }
+                if !certificate.sans.is_empty() {
+                    println!("  SANs: {}", certificate.sans.join(", "));
+                }
+            }
+            if let Some(error) = &report.error {
+                println!("  error: {error}");
+            }
+        }
+        Output::Json => println!("{}", serde_json::to_string_pretty(report).unwrap()),
+        Output::Jsonl => {
+            if let Ok(line) = serde_json::to_string(report) {
+                println!("{line}");
+            }
+        }
+        Output::Csv => {
+            println!("host,port,ok,subject,issuer,serial,not_before,not_after,expired,sans,error");
+            let certificate = report.certificate.as_ref();
+            println!(
+                "{},{},{},{},{},{},{},{},{},{},{}",
+                csv_escape(&report.host),
+                report.port,
+                report.ok,
+                csv_escape(certificate.map_or("", |value| value.subject.as_str())),
+                csv_escape(certificate.map_or("", |value| value.issuer.as_str())),
+                csv_escape(certificate.map_or("", |value| value.serial.as_str())),
+                csv_escape(certificate.map_or("", |value| value.not_before.as_str())),
+                csv_escape(certificate.map_or("", |value| value.not_after.as_str())),
+                certificate.is_some_and(|value| value.expired),
+                csv_escape(
+                    certificate
+                        .map(|value| value.sans.join(";"))
+                        .unwrap_or_default()
+                        .as_str()
+                ),
+                csv_escape(report.error.as_deref().unwrap_or_default())
+            );
+        }
+    }
+}
+
+fn print_user_agents_report(report: &UserAgentsReport, opts: &Options) {
+    if opts.quiet && opts.output == Output::Text {
+        return;
+    }
+    match opts.output {
+        Output::Text => {
+            for agent in &report.user_agents {
+                println!("{agent}");
+            }
+        }
+        Output::Json => println!("{}", serde_json::to_string_pretty(report).unwrap()),
+        Output::Jsonl => {
+            if let Ok(line) = serde_json::to_string(report) {
+                println!("{line}");
+            }
+        }
+        Output::Csv => {
+            println!("user_agent");
+            for agent in &report.user_agents {
+                println!("{}", csv_escape(agent));
+            }
+        }
+    }
+}
+
 fn batch(file: &str, opts: &Options) -> Result<bool, String> {
     let input = if file == "-" {
         let mut value = String::new();
@@ -2125,32 +5335,116 @@ fn batch(file: &str, opts: &Options) -> Result<bool, String> {
         return Err(format!("batch must contain 1-{MAX_BATCH} targets"));
     }
     let workers = MAX_CONCURRENCY.min(targets.len());
+    let chunk_size = targets.len().div_ceil(workers);
     let (sender, receiver) = mpsc::channel();
-    for chunk in targets.chunks(targets.len().div_ceil(workers)) {
+    for (chunk_index, chunk) in targets.chunks(chunk_size).enumerate() {
         let sender = sender.clone();
         let opts = opts.clone();
         let chunk = chunk.to_vec();
+        let start = chunk_index * chunk_size;
         thread::spawn(move || {
-            for value in chunk {
-                sender.send(diagnose(&value, &opts)).ok();
+            for (offset, value) in chunk.into_iter().enumerate() {
+                sender.send((start + offset, diagnose(&value, &opts))).ok();
             }
         });
     }
     drop(sender);
+    let mut results: Vec<Option<Result<DiagnosticReport, String>>> =
+        (0..targets.len()).map(|_| None).collect();
+    for (index, result) in receiver {
+        if let Some(slot) = results.get_mut(index) {
+            *slot = Some(result);
+        }
+    }
+    if opts.output == Output::Csv {
+        print_report_csv_header();
+    }
     let mut ok = true;
-    for result in receiver {
+    for result in results {
         match result {
-            Ok(report) => {
+            Some(Ok(report)) => {
                 ok &= report.ok;
-                print_report_one(&report, opts);
+                if opts.output == Output::Csv {
+                    print_report_csv_row(&report);
+                } else {
+                    print_report_one(&report, opts);
+                }
             }
-            Err(e) => {
+            Some(Err(error)) => {
                 ok = false;
-                eprintln!("error: {e}");
+                eprintln!("error: {error}");
+            }
+            None => {
+                ok = false;
+                eprintln!("error: batch worker did not return a result");
             }
         }
     }
     Ok(ok)
+}
+
+fn completion_script(shell: &str) -> Result<&'static str, String> {
+    match shell.to_ascii_lowercase().as_str() {
+        "bash" => Ok(COMPLETION_BASH),
+        "zsh" => Ok(COMPLETION_ZSH),
+        "fish" => Ok(COMPLETION_FISH),
+        "powershell" | "pwsh" | "ps1" => Ok(COMPLETION_POWERSHELL),
+        "nushell" | "nu" => Ok(COMPLETION_NUSHELL),
+        other => Err(format!(
+            "unsupported shell: {other} (use bash, zsh, fish, powershell, or nushell)"
+        )),
+    }
+}
+
+fn config_template() -> &'static str {
+    "# ddos configuration\n\
+     # Precedence: CLI arguments > DDOS_* environment variables > this file.\n\
+     # Unknown keys are an error.\n\
+     \n\
+     timeout = 5\n\
+     retries = 0\n\
+     output = \"text\"\n\
+     family = \"any\"\n\
+     method = \"HEAD\"\n\
+     redirects = 5\n\
+     verbose = false\n\
+     quiet = false\n\
+     rate = 10\n\
+     count = 20\n\
+     concurrency = 8\n\
+     rotate-user-agent = false\n\
+     random-user-agent = false\n\
+     audit-headers = false\n\
+     # scope = \"/path/to/authorized-scope.txt\"\n\
+     # path = \"/\"\n\
+     # expect-status = 200\n\
+     # show-header = \"server\"\n\
+     # user-agent = \"healthbot/1.0\"\n\
+     # auth-basic = \"user:pass\"\n\
+     # auth-bearer = \"token\"\n\
+     # header = \"X-Trace-Id: 8f14e45f\"\n\
+     # body-bytes = 0\n\
+     # dns-type = \"A\"\n\
+     # dns-server = \"1.1.1.1\"\n\
+     # payload = \"70696e670a\"\n\
+     # ports = \"80,443,8000-8100\"\n\
+     # wordlist = \"/path/to/paths.txt\"\n\
+     # origin = \"https://evil.example\"\n"
+}
+
+fn maintenance_config_init() -> Result<(), String> {
+    let path = default_config_path().ok_or("could not determine the config directory")?;
+    if path.exists() {
+        return Err(format!("config file already exists: {}", path.display()));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    fs::write(&path, config_template())
+        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    println!("Wrote default config to {}", path.display());
+    Ok(())
 }
 
 fn maintenance_update() -> Result<(), String> {
@@ -2204,8 +5498,10 @@ fn run(args: &[String]) -> Result<bool, String> {
         Some("resolve") => {
             let (opts, pos) = options(&args[1..])?;
             let host = pos.first().ok_or("resolve requires <host>")?;
+            scope_precheck_host(host, &opts)?;
             let values =
                 resolve(host, 0, opts.family).map_err(|e| format!("resolve failed: {e}"))?;
+            scope_allows(host, &values, &opts)?;
             if opts.output == Output::Json {
                 println!(
                     "{}",
@@ -2232,8 +5528,10 @@ fn run(args: &[String]) -> Result<bool, String> {
                     println!("{},{},{}", csv_escape(host), family(value), value.ip());
                 }
             } else {
-                for value in &values {
-                    println!("{} ({})", value.ip(), family(value));
+                if !opts.quiet {
+                    for value in &values {
+                        println!("{} ({})", value.ip(), family(value));
+                    }
                 }
             }
             Ok(!values.is_empty())
@@ -2253,11 +5551,10 @@ fn run(args: &[String]) -> Result<bool, String> {
         Some("http-check") => {
             let (opts, pos) = options(&args[1..])?;
             let host = pos.first().ok_or("http-check requires <host>")?;
-            let port = pos
-                .get(1)
-                .ok_or("http-check requires a port (default is 80, or omit it entirely)")?
-                .parse::<u16>()
-                .map_err(|_| "port must be 1-65535")?;
+            let port = match pos.get(1) {
+                Some(value) => value.parse::<u16>().map_err(|_| "port must be 1-65535")?,
+                None => 80,
+            };
             let report = diagnose(&format!("http://{host}:{port}{}", opts.path), &opts)?;
             print_report_one(&report, &opts);
             Ok(report.ok)
@@ -2269,6 +5566,18 @@ fn run(args: &[String]) -> Result<bool, String> {
             print_report_one(&report, &opts);
             Ok(report.ok)
         }
+        Some("report") => {
+            let (mut opts, pos) = options(&args[1..])?;
+            let value = pos.first().ok_or("report requires <url|host:port>")?;
+            opts.audit_headers = true;
+            let report = diagnose(value, &opts)?;
+            if opts.output == Output::Text {
+                print_markdown_report(&report, &opts);
+            } else {
+                print_report_one(&report, &opts);
+            }
+            Ok(report.ok)
+        }
         Some("udp-check") => {
             let (opts, pos) = options(&args[1..])?;
             let host = pos.first().ok_or("udp-check requires <host>")?;
@@ -2278,6 +5587,7 @@ fn run(args: &[String]) -> Result<bool, String> {
                 .parse::<u16>()
                 .map_err(|_| "port must be 1-65535")?;
             let started = Instant::now();
+            scope_precheck_host(host, &opts)?;
             let resolved = resolve(host, port, opts.family)
                 .map_err(|e| format!("DNS resolution failed: {e}"))?;
             if resolved.is_empty() {
@@ -2290,6 +5600,7 @@ fn run(args: &[String]) -> Result<bool, String> {
                     }
                 ));
             }
+            scope_allows(host, &resolved, &opts)?;
             let payload = opts.payload.clone().unwrap_or_else(|| b"ping\n".to_vec());
             let attempts: Vec<UdpAttempt> = resolved
                 .iter()
@@ -2317,6 +5628,7 @@ fn run(args: &[String]) -> Result<bool, String> {
         Some("dns-check") => {
             let (opts, pos) = options(&args[1..])?;
             let host = pos.first().ok_or("dns-check requires <host>")?;
+            ensure_scope_host(host, &opts)?;
             let record = opts.dns_type.unwrap_or(DnsType::A);
             let server = opts.dns_server.map(Ok).unwrap_or_else(system_resolver)?;
             validate_dns_host(host)?;
@@ -2405,6 +5717,63 @@ fn run(args: &[String]) -> Result<bool, String> {
             print_dns_report(&report, &opts);
             Ok(report.ok)
         }
+        Some("tls-check") => {
+            let (opts, pos) = options(&args[1..])?;
+            let host = pos.first().ok_or("tls-check requires <host>")?;
+            ensure_scope_host(host, &opts)?;
+            let port = match pos.get(1) {
+                Some(value) => value.parse::<u16>().map_err(|_| "port must be 1-65535")?,
+                None => 443,
+            };
+            let started = Instant::now();
+            let (certificate, error) = match certificate_probe(host, port, &opts) {
+                Ok(value) => (Some(value), None),
+                Err(error) => (None, Some(error)),
+            };
+            let report = TlsReport {
+                schema_version: 1,
+                version: VERSION.into(),
+                host: host.clone(),
+                port,
+                certificate,
+                ok: error.is_none(),
+                total_elapsed_ms: started.elapsed().as_millis(),
+                error,
+            };
+            print_tls_report(&report, &opts);
+            Ok(report.ok)
+        }
+        Some("user-agents") => {
+            let (opts, _pos) = options(&args[1..])?;
+            let report = UserAgentsReport {
+                schema_version: 1,
+                version: VERSION.into(),
+                user_agents: ROTATING_USER_AGENTS
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect(),
+            };
+            print_user_agents_report(&report, &opts);
+            Ok(true)
+        }
+        Some("completion") => {
+            let shell = args
+                .get(1)
+                .ok_or("completion requires a shell: bash, zsh, fish, powershell, or nushell")?;
+            print!("{}", completion_script(shell)?);
+            Ok(true)
+        }
+        Some("config") => match args.get(1).map(String::as_str) {
+            Some("path") => {
+                let path =
+                    default_config_path().ok_or("could not determine the config directory")?;
+                println!("{}", path.display());
+                Ok(true)
+            }
+            Some("init") => maintenance_config_init().map(|_| true),
+            Some(other) => Err(format!("unknown config action: {other} (use path or init)")),
+            None => Err("config requires an action: path or init".into()),
+        },
         Some("batch") => {
             let (opts, pos) = options(&args[1..])?;
             batch(pos.first().ok_or("batch requires <file|->")?, &opts)
@@ -2416,6 +5785,88 @@ fn run(args: &[String]) -> Result<bool, String> {
             let ok = report.ok == report.sent;
             print_load_test_report(&report, &opts);
             Ok(ok)
+        }
+        Some("capacity-test") => {
+            let (opts, pos) = options(&args[1..])?;
+            let value = pos
+                .first()
+                .ok_or("capacity-test requires <url|host:port>")?;
+            let report = capacity_test(value, &opts)?;
+            let ok = report.total_failed == 0;
+            print_capacity_report(&report, &opts);
+            Ok(ok)
+        }
+        Some("connection-churn") => {
+            let (opts, pos) = options(&args[1..])?;
+            let host = pos.first().ok_or("connection-churn requires <host>")?;
+            let port = pos
+                .get(1)
+                .ok_or("connection-churn requires <port>")?
+                .parse::<u16>()
+                .map_err(|_| "port must be 1-65535")?;
+            let report = connection_churn(host, port, &opts)?;
+            let ok = report.failed == 0;
+            print_churn_report(&report, &opts);
+            Ok(ok)
+        }
+        Some("slow-request") => {
+            let (opts, pos) = options(&args[1..])?;
+            let host = pos.first().ok_or("slow-request requires <host>")?;
+            let port = pos
+                .get(1)
+                .ok_or("slow-request requires <port>")?
+                .parse::<u16>()
+                .map_err(|_| "port must be 1-65535")?;
+            let report = slow_request(host, port, &opts)?;
+            print_slow_report(&report, &opts);
+            Ok(true)
+        }
+        Some("request-shape") => {
+            let (opts, pos) = options(&args[1..])?;
+            let value = pos
+                .first()
+                .ok_or("request-shape requires <url|host:port>")?;
+            let report = request_shape(value, &opts)?;
+            let ok = report.server_errors == 0 && report.transport_errors == 0;
+            print_shape_report(&report, &opts);
+            Ok(ok)
+        }
+        Some("port-scan") => {
+            let (opts, pos) = options(&args[1..])?;
+            let host = pos.first().ok_or("port-scan requires <host>")?;
+            let report = port_scan(host, &opts)?;
+            print_port_scan_report(&report, &opts);
+            Ok(report.ok)
+        }
+        Some("path-discovery") => {
+            let (opts, pos) = options(&args[1..])?;
+            let value = pos
+                .first()
+                .ok_or("path-discovery requires <url|host:port>")?;
+            let report = path_discovery(value, &opts)?;
+            print_path_discovery_report(&report, &opts);
+            Ok(report.ok)
+        }
+        Some("cors-check") => {
+            let (opts, pos) = options(&args[1..])?;
+            let value = pos.first().ok_or("cors-check requires <url|host:port>")?;
+            let report = cors_check(value, &opts)?;
+            print_cors_report(&report, &opts);
+            Ok(report.ok)
+        }
+        Some("cookie-check") => {
+            let (opts, pos) = options(&args[1..])?;
+            let value = pos.first().ok_or("cookie-check requires <url|host:port>")?;
+            let report = cookie_check(value, &opts)?;
+            print_cookie_report(&report, &opts);
+            Ok(report.ok)
+        }
+        Some("method-check") => {
+            let (opts, pos) = options(&args[1..])?;
+            let value = pos.first().ok_or("method-check requires <url|host:port>")?;
+            let report = method_check(value, &opts)?;
+            print_method_report(&report, &opts);
+            Ok(report.ok)
         }
         Some("repeat") => {
             let (opts, pos) = options(&args[1..])?;
@@ -2443,6 +5894,10 @@ fn run(args: &[String]) -> Result<bool, String> {
                 let report = diagnose(value, &opts)?;
                 ok &= report.ok;
                 print_report_one(&report, &opts);
+                let next = Instant::now() + Duration::from_secs(interval);
+                if next >= end {
+                    break;
+                }
                 thread::sleep(Duration::from_secs(interval));
             }
             Ok(ok)
@@ -2451,8 +5906,99 @@ fn run(args: &[String]) -> Result<bool, String> {
     }
 }
 
+fn audit_log_path(args: &[String]) -> Option<PathBuf> {
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--auth" {
+            index += 3;
+            continue;
+        }
+        if args[index] == "--audit-log" {
+            return args.get(index + 1).map(PathBuf::from);
+        }
+        index += 1;
+    }
+    env_value("DDOS_AUDIT_LOG").map(PathBuf::from)
+}
+
+fn redact_url_credentials(value: &str) -> String {
+    let Some(scheme_end) = value.find("://") else {
+        return value.to_string();
+    };
+    let authority_start = scheme_end + 3;
+    let rest = &value[authority_start..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let Some(at) = authority.rfind('@') else {
+        return value.to_string();
+    };
+    format!(
+        "{}{}{}",
+        &value[..authority_start],
+        &authority[at + 1..],
+        &rest[authority_end..]
+    )
+}
+
+fn write_audit_entry(
+    path: &Path,
+    args: &[String],
+    outcome: &Result<bool, String>,
+    exit_code: u8,
+) -> io::Result<()> {
+    let timestamp_unix = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or(0);
+    let status = match outcome {
+        Ok(true) => "ok",
+        Ok(false) => "failed",
+        Err(_) => "error",
+    };
+    let command = args.first().map(String::as_str).unwrap_or("");
+    let target = args
+        .get(1)
+        .filter(|value| !value.starts_with('-'))
+        .map(|value| redact_url_credentials(value));
+    let error = outcome
+        .as_ref()
+        .err()
+        .map(|value| redact_url_credentials(value));
+    let entry = serde_json::json!({
+        "timestamp_unix": timestamp_unix,
+        "version": VERSION,
+        "command": command,
+        "target": target,
+        "status": status,
+        "exit_code": exit_code,
+        "error": error,
+    });
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(&entry).expect("audit entry serializes")
+    )
+}
+
 fn main() -> ExitCode {
-    match run(&env::args().skip(1).collect::<Vec<_>>()) {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    let audit_path = audit_log_path(&args);
+    let outcome = run(&args);
+    let exit_code = match &outcome {
+        Ok(true) => 0,
+        Ok(false) => 1,
+        Err(_) => 2,
+    };
+    if let Some(path) = audit_path {
+        if let Err(error) = write_audit_entry(&path, &args, &outcome, exit_code) {
+            eprintln!("warning: could not write audit log: {error}");
+        }
+    }
+    match outcome {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(error) => {
@@ -2465,6 +6011,19 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_file(name: &str, contents: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "ddos-{name}-{}-{}.txt",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, contents).unwrap();
+        path
+    }
 
     #[test]
     fn parses_https_target() {
@@ -2723,17 +6282,17 @@ mod tests {
 
     #[test]
     fn loopback_gate_refuses_public_hosts() {
-        assert!(ensure_loopback("rkriad585.github.io", Family::Any).is_err());
-        assert!(ensure_loopback("1.1.1.1", Family::Any).is_err());
-        assert!(ensure_loopback("example.com", Family::Any).is_err());
+        assert!(ensure_loopback("rkriad585.github.io", Family::Any, "test").is_err());
+        assert!(ensure_loopback("1.1.1.1", Family::Any, "test").is_err());
+        assert!(ensure_loopback("example.com", Family::Any, "test").is_err());
     }
 
     #[test]
     fn loopback_gate_accepts_loopback_only() {
-        assert!(ensure_loopback("localhost", Family::Any).is_ok());
-        assert!(ensure_loopback("127.0.0.1", Family::Any).is_ok());
-        assert!(ensure_loopback("::1", Family::Any).is_ok());
-        assert!(ensure_loopback("LOCALHOST", Family::Any).is_ok());
+        assert!(ensure_loopback("localhost", Family::Any, "test").is_ok());
+        assert!(ensure_loopback("127.0.0.1", Family::Any, "test").is_ok());
+        assert!(ensure_loopback("::1", Family::Any, "test").is_ok());
+        assert!(ensure_loopback("LOCALHOST", Family::Any, "test").is_ok());
     }
 
     #[test]
@@ -2759,6 +6318,76 @@ mod tests {
         assert!((1..=50).contains(&opts.rate));
         assert!((1..=5000).contains(&opts.count));
         assert!(!opts.rotate_user_agent);
+        assert!(!opts.random_user_agent);
+    }
+
+    #[test]
+    fn allow_header_is_parsed_and_deduped() {
+        assert_eq!(
+            parse_allow_header(Some("GET, post, GET ,, HEAD")),
+            vec!["GET", "POST", "HEAD"]
+        );
+        assert!(parse_allow_header(None).is_empty());
+        assert!(parse_allow_header(Some("  ")).is_empty());
+    }
+
+    #[test]
+    fn method_audit_flags_trace_and_dangerous_methods() {
+        let probes = vec![
+            MethodProbe {
+                method: "OPTIONS".into(),
+                status: Some(204),
+                status_text: Some("No Content".into()),
+                elapsed_ms: 1,
+                allowed: true,
+                error: None,
+            },
+            MethodProbe {
+                method: "TRACE".into(),
+                status: Some(200),
+                status_text: Some("OK".into()),
+                elapsed_ms: 1,
+                allowed: true,
+                error: None,
+            },
+        ];
+        let findings = analyze_methods(Some("GET, PUT, TRACE"), &probes);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "trace_enabled"));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "dangerous_methods_advertised"));
+    }
+
+    #[test]
+    fn method_audit_accepts_clean_options() {
+        let probes = vec![MethodProbe {
+            method: "OPTIONS".into(),
+            status: Some(204),
+            status_text: Some("No Content".into()),
+            elapsed_ms: 1,
+            allowed: true,
+            error: None,
+        }];
+        let findings = analyze_methods(Some("GET, HEAD, OPTIONS"), &probes);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn method_audit_notes_missing_allow_header() {
+        let probes = vec![MethodProbe {
+            method: "OPTIONS".into(),
+            status: Some(200),
+            status_text: Some("OK".into()),
+            elapsed_ms: 1,
+            allowed: true,
+            error: None,
+        }];
+        let findings = analyze_methods(None, &probes);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "allow_header_missing");
+        assert_eq!(findings[0].severity, "info");
     }
 
     #[test]
@@ -2769,12 +6398,506 @@ mod tests {
     }
 
     #[test]
+    fn random_user_agent_flag_is_absorbed() {
+        let (opts, pos) = options(&["--random-user-agent".into()]).unwrap();
+        assert!(opts.random_user_agent);
+        assert!(pos.is_empty());
+    }
+
+    #[test]
     fn rotating_browser_agents_are_valid_and_distinct() {
         let mut seen = std::collections::HashSet::new();
         for agent in ROTATING_USER_AGENTS {
             assert!(validate_user_agent(agent).is_ok());
+            assert!(
+                agent.starts_with("Mozilla/5.0"),
+                "user agent should look like a real browser: {agent}"
+            );
+            assert!(
+                !agent.contains("ddos/"),
+                "placeholder user agents are not allowed: {agent}"
+            );
             seen.insert(agent.to_string());
         }
         assert_eq!(seen.len(), ROTATING_USER_AGENTS.len());
+    }
+
+    #[test]
+    fn random_index_stays_within_bounds() {
+        let mut state = seed_random_state();
+        for _ in 0..1000 {
+            assert!(
+                random_index(&mut state, ROTATING_USER_AGENTS.len()) < ROTATING_USER_AGENTS.len()
+            );
+        }
+        assert_eq!(random_index(&mut state, 0), 0);
+    }
+
+    #[test]
+    fn picked_random_user_agent_is_valid() {
+        assert!(validate_user_agent(pick_random_user_agent()).is_ok());
+    }
+
+    #[test]
+    fn quiet_and_no_color_flags_are_absorbed() {
+        let (opts, pos) = options(&["--quiet".into(), "--no-color".into()]).unwrap();
+        assert!(opts.quiet);
+        assert!(pos.is_empty());
+    }
+
+    #[test]
+    fn completion_scripts_are_embedded() {
+        assert!(completion_script("bash")
+            .unwrap()
+            .contains("complete -F _ddos ddos"));
+        assert!(completion_script("bash").unwrap().contains("report"));
+        assert!(completion_script("pwsh").is_ok());
+        assert!(completion_script("tcsh").is_err());
+    }
+
+    #[test]
+    fn config_template_parses() {
+        let mut opts = fresh_options();
+        apply_config_file(&mut opts, config_template(), Path::new("template.toml")).unwrap();
+        assert_eq!(opts.timeout, Duration::from_secs(5));
+        assert!(!opts.quiet);
+        assert!(!opts.verbose);
+    }
+
+    #[test]
+    fn tcp_check_reaches_local_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let _ = listener.accept().unwrap();
+        });
+        let report = diagnose(&format!("127.0.0.1:{port}"), &fresh_options()).unwrap();
+        handle.join().unwrap();
+        assert!(report.ok);
+        assert!(report.resolved.iter().any(|value| value.connected));
+    }
+
+    #[test]
+    fn http_probe_reads_local_response() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nContent-Security-Policy: default-src 'none'\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let mut opts = fresh_options();
+        opts.audit_headers = true;
+        let result = http_probe(
+            &format!("http://127.0.0.1:{port}/"),
+            "127.0.0.1",
+            port,
+            &opts,
+        );
+        handle.join().unwrap();
+        assert_eq!(result.status, Some(200));
+        assert!(result.status_ok);
+        let checks = result.security_headers.expect("header audit requested");
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "content-security-policy" && check.present));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "x-content-type-options" && check.present));
+        assert!(checks
+            .iter()
+            .any(|check| check.name == "strict-transport-security" && !check.present));
+    }
+
+    #[test]
+    fn scope_file_matches_hosts_and_networks() {
+        let path = temp_file(
+            "scope",
+            "# authorized targets\nlocalhost\n*.example.com\n192.0.2.0/24\n2001:db8::/32\n198.51.100.7\n",
+        );
+        let scope = Scope::load(&path).unwrap();
+        assert!(scope.allows_host("localhost"));
+        assert!(scope.allows_host("api.example.com"));
+        assert!(scope.allows_host("deep.api.example.com"));
+        assert!(!scope.allows_host("example.com"));
+        assert!(scope.allows_ip("192.0.2.55".parse().unwrap()));
+        assert!(!scope.allows_ip("192.0.3.55".parse().unwrap()));
+        assert!(scope.allows_ip("2001:db8::1".parse().unwrap()));
+        assert!(scope.allows_ip("198.51.100.7".parse().unwrap()));
+        assert!(!scope.allows_ip("198.51.100.8".parse().unwrap()));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn scope_and_audit_flags_are_absorbed() {
+        let scope_path = temp_file("scope-flag", "example.com\n");
+        let (opts, positional) = options(&[
+            "--no-config".into(),
+            "--scope".into(),
+            scope_path.to_str().unwrap().into(),
+            "--audit-log".into(),
+            "audit.jsonl".into(),
+            "--audit-headers".into(),
+        ])
+        .unwrap();
+        assert!(opts.scope.is_some());
+        assert!(opts.audit_headers);
+        assert!(positional.is_empty());
+        assert!(ensure_scope_host("example.com", &opts).is_ok());
+        assert!(ensure_scope_host("outside.example", &opts).is_err());
+        fs::remove_file(scope_path).unwrap();
+    }
+
+    #[test]
+    fn audit_log_writes_jsonl() {
+        let path = temp_file("audit", "");
+        let args = vec!["diagnose".into(), "example.com".into()];
+        write_audit_entry(&path, &args, &Ok(true), 0).unwrap();
+        let line = fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(value["command"], "diagnose");
+        assert_eq!(value["target"], "example.com");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["exit_code"], 0);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn audit_log_redacts_url_credentials() {
+        let path = temp_file("audit-redacted", "");
+        let args = vec![
+            "diagnose".into(),
+            "https://user:secret@example.com/health".into(),
+        ];
+        write_audit_entry(&path, &args, &Err("failed".into()), 2).unwrap();
+        let line = fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(value["target"], "https://example.com/health");
+        assert!(!line.contains("secret"));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn unix_time_formats_as_utc() {
+        assert_eq!(format_unix_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_unix_utc(1_700_000_000), "2023-11-14T22:13:20Z");
+    }
+
+    #[test]
+    fn markdown_report_contains_assessment_findings() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (first, _) = listener.accept().unwrap();
+            drop(first);
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nContent-Security-Policy: default-src 'none'\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let mut opts = fresh_options();
+        opts.audit_headers = true;
+        let report = diagnose(&format!("http://127.0.0.1:{port}/"), &opts).unwrap();
+        handle.join().unwrap();
+        let markdown = markdown_report(&report, &opts);
+        assert!(markdown.contains("# ddos assessment report"));
+        assert!(markdown.contains("| HTTP | PASS | 200 OK |"));
+        assert!(markdown.contains("### Security headers"));
+        assert!(markdown.contains("content-security-policy"));
+        assert!(markdown.contains("## Notes"));
+    }
+
+    #[test]
+    fn port_spec_parses_ranges_and_deduplicates() {
+        assert_eq!(
+            parse_ports("80,443,8000-8002").unwrap(),
+            vec![80, 443, 8000, 8001, 8002]
+        );
+        assert_eq!(parse_ports("443,80,443").unwrap(), vec![80, 443]);
+        assert!(parse_ports("0").is_err());
+        assert!(parse_ports("65536").is_err());
+        assert!(parse_ports("10-1").is_err());
+        assert!(parse_ports("").is_err());
+        assert!(parse_ports("1-1001").is_err());
+    }
+
+    #[test]
+    fn default_scan_ports_fit_inside_budget() {
+        let ports = parse_ports(DEFAULT_SCAN_PORTS).unwrap();
+        assert!(!ports.is_empty());
+        assert!(ports.len() <= MAX_PORT_SCAN_PORTS);
+    }
+
+    #[test]
+    fn origin_validation_accepts_http_https_and_null() {
+        assert!(validate_origin("https://evil.example").is_ok());
+        assert!(validate_origin("http://127.0.0.1:3030").is_ok());
+        assert!(validate_origin("null").is_ok());
+        assert!(validate_origin("ftp://evil.example").is_err());
+        assert!(validate_origin("evil.example").is_err());
+        assert!(validate_origin("https://evil.example/\r\nX-Test: 1").is_err());
+    }
+
+    #[test]
+    fn active_scope_requires_scope_for_public_targets() {
+        assert!(require_active_scope("127.0.0.1", &fresh_options(), "port-scan").is_ok());
+        assert!(require_active_scope("localhost", &fresh_options(), "port-scan").is_ok());
+        assert!(require_active_scope("example.com", &fresh_options(), "port-scan").is_err());
+        let path = temp_file("scan-scope", "example.com\n");
+        let (opts, _) = options(&[
+            "--no-config".into(),
+            "--scope".into(),
+            path.to_str().unwrap().into(),
+        ])
+        .unwrap();
+        assert!(require_active_scope("example.com", &opts, "port-scan").is_ok());
+        assert!(require_active_scope("outside.example", &opts, "port-scan").is_err());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn security_grade_scores_weighted_headers() {
+        let checks = SECURITY_HEADERS
+            .iter()
+            .map(|(name, _)| HeaderCheck {
+                name: (*name).into(),
+                present: true,
+                value: None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(security_grade(&checks), (100, "A".into()));
+        let mut partial = checks.clone();
+        partial[1].present = false;
+        assert_eq!(security_grade(&partial), (75, "B".into()));
+        let mut none = checks;
+        for check in &mut none {
+            check.present = false;
+        }
+        assert_eq!(security_grade(&none), (0, "F".into()));
+    }
+
+    #[test]
+    fn cors_analysis_flags_wildcard_and_reflection() {
+        let wildcard = analyze_cors(Some("*"), Some("true"), None, "https://evil.example");
+        assert!(wildcard.iter().any(
+            |finding| finding.code == "wildcard_with_credentials" && finding.severity == "high"
+        ));
+        let reflected = analyze_cors(
+            Some("https://evil.example"),
+            Some("true"),
+            None,
+            "https://evil.example",
+        );
+        assert!(reflected
+            .iter()
+            .any(|finding| finding.code == "reflected_with_credentials"
+                && finding.severity == "critical"));
+        assert!(reflected
+            .iter()
+            .any(|finding| finding.code == "missing_vary_origin"));
+        let fixed = analyze_cors(
+            Some("https://good.example"),
+            None,
+            None,
+            "https://evil.example",
+        );
+        assert!(fixed.is_empty());
+    }
+
+    #[test]
+    fn cookie_analysis_flags_insecure_cookies() {
+        let values = vec!["session=abc; Path=/; SameSite=None".to_string()];
+        let (cookies, findings) = analyze_set_cookie(&values);
+        assert_eq!(cookies[0].name, "session");
+        assert!(!cookies[0].secure);
+        assert!(!cookies[0].http_only);
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "missing_secure"));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "missing_httponly"));
+        assert!(findings
+            .iter()
+            .any(|finding| finding.code == "samesite_none_without_secure"));
+        let hardened =
+            vec!["__Host-sid=abc; Secure; HttpOnly; SameSite=Strict; Path=/".to_string()];
+        let (cookies, findings) = analyze_set_cookie(&hardened);
+        assert!(cookies[0].secure);
+        assert!(cookies[0].http_only);
+        assert!(findings.is_empty());
+        let (_, findings) = analyze_set_cookie(&[]);
+        assert_eq!(findings[0].code, "no_cookies");
+        assert_eq!(findings[0].severity, "info");
+    }
+
+    #[test]
+    fn discovery_paths_are_valid_and_bounded() {
+        let (opts, _) = options(&[]).unwrap();
+        let paths = read_discovery_paths(&opts).unwrap();
+        assert_eq!(paths.len(), DEFAULT_DISCOVERY_PATHS.len());
+        for path in &paths {
+            assert!(validate_discovery_path(path).is_ok(), "{path}");
+        }
+        assert!(validate_discovery_path("admin").is_err());
+        assert!(validate_discovery_path("/a b").is_err());
+        assert!(validate_discovery_path("/ok\r\n").is_err());
+    }
+
+    #[test]
+    fn new_options_are_parsed() {
+        let wordlist = temp_file("wordlist-option", "/admin\n");
+        let (opts, _) = options(&[
+            "--no-config".into(),
+            "--ports".into(),
+            "80,443".into(),
+            "--concurrency".into(),
+            "2".into(),
+            "--origin".into(),
+            "https://evil.example".into(),
+            "--wordlist".into(),
+            wordlist.to_str().unwrap().into(),
+        ])
+        .unwrap();
+        assert_eq!(opts.ports.as_deref(), Some("80,443"));
+        assert_eq!(opts.concurrency, 2);
+        assert_eq!(opts.origin.as_deref(), Some("https://evil.example"));
+        assert_eq!(opts.wordlist.as_deref(), Some(wordlist.as_path()));
+        fs::remove_file(wordlist).unwrap();
+    }
+
+    #[test]
+    fn http_probe_preserves_4xx_for_expect_status() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let mut opts = fresh_options();
+        opts.expect_status = Some(401);
+        let result = http_probe(
+            &format!("http://127.0.0.1:{port}/"),
+            "127.0.0.1",
+            port,
+            &opts,
+        );
+        handle.join().unwrap();
+        assert_eq!(result.status, Some(401));
+        assert!(result.status_ok);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn port_scan_finds_local_listener() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let _ = listener.accept();
+        });
+        let mut opts = fresh_options();
+        opts.ports = Some(port.to_string());
+        opts.timeout = Duration::from_millis(200);
+        let report = port_scan("127.0.0.1", &opts).unwrap();
+        handle.join().unwrap();
+        assert_eq!(report.open_count, 1);
+        assert!(report
+            .open
+            .iter()
+            .any(|value| value.ends_with(&format!(":{port}"))));
+    }
+
+    #[test]
+    fn cors_check_flags_wildcard_credentials() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Credentials: true\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let report = cors_check(&format!("http://127.0.0.1:{port}/api"), &fresh_options()).unwrap();
+        handle.join().unwrap();
+        assert!(!report.ok);
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "wildcard_with_credentials"));
+    }
+
+    #[test]
+    fn cookie_check_collects_multiple_set_cookie_headers() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nSet-Cookie: session=abc; Path=/\r\nSet-Cookie: theme=dark; Secure; HttpOnly; SameSite=Lax\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let report =
+            cookie_check(&format!("http://127.0.0.1:{port}/login"), &fresh_options()).unwrap();
+        handle.join().unwrap();
+        assert_eq!(report.cookies.len(), 2);
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "missing_secure" && finding.cookie == "session"));
+    }
+
+    #[test]
+    fn path_discovery_reports_interesting_statuses() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let _ = stream.read(&mut request);
+                let response = if String::from_utf8_lossy(&request).contains("/admin") {
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nadmin"
+                        .as_slice()
+                } else {
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .as_slice()
+                };
+                stream.write_all(response).unwrap();
+            }
+        });
+        let wordlist = temp_file("wordlist-discovery", "/admin\n/missing\n");
+        let mut opts = fresh_options();
+        opts.wordlist = Some(wordlist.clone());
+        let report = path_discovery(&format!("http://127.0.0.1:{port}"), &opts).unwrap();
+        handle.join().unwrap();
+        fs::remove_file(wordlist).unwrap();
+        assert_eq!(report.scanned_count, 2);
+        assert_eq!(report.found_count, 1);
+        assert!(report.results.iter().any(|result| result.path == "/admin"
+            && result.status == Some(200)
+            && result.interesting));
     }
 }
