@@ -1,6 +1,6 @@
 [package]
 name = "ddos"
-version = "0.0.2-beta"
+version = "0.0.3-beta"
 edition = "2021"
 description = "A bounded network diagnostics CLI for systems you own or are authorized to test"
 license = "GPL-3.0-only"

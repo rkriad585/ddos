@@ -1,0 +1,10 @@
+# Authorized local assessment targets.
+http://127.0.0.1:3030/health
+http://127.0.0.1:3030/headers/full
+http://127.0.0.1:3030/headers/partial
+http://127.0.0.1:3030/headers/none
+http://127.0.0.1:3030/api/users
+http://127.0.0.1:3030/api/login?user=admin
+http://127.0.0.1:3030/admin
+http://127.0.0.1:3030/debug
+http://127.0.0.1:3030/nonexistent

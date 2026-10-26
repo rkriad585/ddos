@@ -3,6 +3,7 @@ FROM rust:slim AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY completions ./completions
 RUN cargo build --locked --release
 
 FROM debian:stable-slim

@@ -86,7 +86,7 @@ DDOS_SCOPE=scope.txt ddos diagnose https://client.example
 JSON object per run:
 
 ```json
-{"command":"diagnose","error":null,"exit_code":0,"status":"ok","target":"https://client.example","timestamp_unix":1792507843,"version":"0.0.2-beta"}
+{"command":"diagnose","error":null,"exit_code":0,"status":"ok","target":"https://client.example","timestamp_unix":1792507843,"version":"0.0.3-beta"}
 ```
 
 The record contains the command, target, status, exit code, and optional error.

@@ -1,0 +1,8 @@
+timeout = 5
+retries = 1
+output = "json"
+family = "any"
+method = "GET"
+redirects = 5
+audit-headers = true
+scope = "demo-webapp/scope.txt"

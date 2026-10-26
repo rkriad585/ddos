@@ -13,7 +13,7 @@
         in {
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "ddos";
-            version = "0.0.2-beta";
+            version = "0.0.3-beta";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
           };

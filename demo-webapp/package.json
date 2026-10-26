@@ -1,0 +1,14 @@
+{
+  "name": "ddos-demo-webapp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Intentionally vulnerable local web app for authorized ddos diagnostics practice",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "assess": "python3 assess.py"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

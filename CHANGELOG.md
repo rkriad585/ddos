@@ -1,7 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.0.3-beta
 
+- Bumped the package, container, and documentation version to `0.0.3-beta`.
+- Fixed the container build by including the embedded completion scripts.
 - Added `tls-check` for certificate metadata and `user-agents` for inspecting
   the built-in browser user-agent pool.
 - Added `--random-user-agent` and expanded the realistic browser user-agent

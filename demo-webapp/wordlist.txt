@@ -1,0 +1,6 @@
+# Focused paths for the enhanced path-discovery check.
+/admin
+/debug
+/download
+/openapi.json
+/missing
